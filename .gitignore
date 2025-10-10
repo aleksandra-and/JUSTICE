@@ -232,6 +232,9 @@ limitarian_analysis.py
 paper_data_figures_generator.ipynb
 paper_data_figures_generator_codeocean.ipynb
 reproducing_data_and_plots.py
+ml_importance_plots/*
+figs/*
+solvers/moea/*
 # tests/verification_data/*
 #Mac
 .DS_Store
