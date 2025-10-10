@@ -10,8 +10,8 @@ import random
 from justice.util.enumerations import *
 import json
 
-from solvers.moea.borgMOEA import BorgMOEA
-from ema_workbench.em_framework.optimization import EpsNSGAII
+# from solvers.moea.borgMOEA import BorgMOEA
+# from ema_workbench.em_framework.optimization import EpsNSGAII
 
 # Suppress numpy version warnings
 import warnings
@@ -56,11 +56,15 @@ from config.default_parameters import SocialWelfareDefaults
 
 SMALL_NUMBER = 1e-9  # Used to avoid division by zero in RBF calculations
 
+# EMA Platypus Adapter
+from borg_platypus_adapter import BorgMOEA, set_ema_context
+
+
 
 def run_optimization_adaptive(
     config_path,
     nfe=None,
-    # population_size=100,  # Default population size. For local machine, use smaller values like 5 or less
+    population_size=100,  # Default population size. For local machine, use smaller values like 5 or less
     swf=0,
     seed=None,
     datapath="./data",
@@ -244,39 +248,41 @@ def run_optimization_adaptive(
     elif optimizer == Optimizer.BorgMOEA:
         algorithm = BorgMOEA
 
+    set_ema_context(model=model, reference=reference_scenario)
+
     if evaluator == Evaluator.MPIEvaluator:
-        with MPIEvaluator(model) as evaluator:  # Use this for HPC
-            results = evaluator.optimize(
+        with MPIEvaluator(model) as _evaluator:  # Use this for HPC
+            results = _evaluator.optimize(
                 searchover="levers",
                 nfe=nfe,
                 epsilons=epsilons,
                 reference=reference_scenario,
                 convergence=convergence_metrics,
-                # population_size=population_size,
+                population_size=population_size,
                 algorithm=algorithm,
             )
     elif evaluator == Evaluator.MultiprocessingEvaluator:
-        with MultiprocessingEvaluator(model) as evaluator:
-            results = evaluator.optimize(
+        with MultiprocessingEvaluator(model) as _evaluator:
+            results = _evaluator.optimize(
                 searchover="levers",
                 nfe=nfe,
                 epsilons=epsilons,
                 reference=reference_scenario,
                 convergence=convergence_metrics,
-                # population_size=population_size,
+                population_size=population_size,
                 algorithm=algorithm,
             )
     else:
 
         # with MPIEvaluator(model) as evaluator:  # Use this for HPC
-        with SequentialEvaluator(model) as evaluator:  # Use this for local machine
-            results = evaluator.optimize(
+        with SequentialEvaluator(model) as _evaluator:  # Use this for local machine
+            results = _evaluator.optimize(
                 searchover="levers",
                 nfe=nfe,
                 epsilons=epsilons,
                 reference=reference_scenario,
                 convergence=convergence_metrics,
-                # population_size=population_size,  # NOTE set population parameters for local machine. It is faster for testing
+                population_size=population_size,  # NOTE set population parameters for local machine. It is faster for testing
                 algorithm=algorithm,
             )
 
@@ -584,7 +590,7 @@ if __name__ == "__main__":
         swf=0,
         seed=seed,
         datapath="./data",
-        optimizer=Optimizer.EpsNSGAII,
-        population_size=2,  # Optimizer.BorgMOEA,
+        optimizer=Optimizer.BorgMOEA, # Optimizer.EpsNSGAII,  # Optimizer.BorgMOEA,
+        population_size=50, 
         evaluator=Evaluator.SequentialEvaluator,
     )
