@@ -1,7 +1,3 @@
-"""
-This module contains the uncertainty analysis for the JUSTICE model using EMA Workbench.
-"""
-
 import functools
 import datetime
 import numpy as np
@@ -11,7 +7,7 @@ from justice.util.enumerations import *
 import json
 
 # from solvers.moea.borgMOEA import BorgMOEA
-# from ema_workbench.em_framework.optimization import EpsNSGAII
+from ema_workbench.em_framework.optimization import EpsNSGAII
 
 # Suppress numpy version warnings
 import warnings
@@ -59,6 +55,131 @@ SMALL_NUMBER = 1e-9  # Used to avoid division by zero in RBF calculations
 # EMA Platypus Adapter
 from borg_platypus_adapter import BorgMOEA, set_ema_context
 
+from platypus import Solution
+from borg_platypus_adapter import _ArchiveView, _AlgorithmStub
+
+
+# Minimal MPI subclasses that call solveMPI instead of solve()
+
+
+class MSBorgMOEA(BorgMOEA):
+    """Master–Slave Borg: requires MPI and >= 2 ranks."""
+
+    def __init__(self, problem, epsilons, population_size=None, **kwargs):
+        # use master–slave library by default
+        super().__init__(
+            problem,
+            epsilons,
+            population_size=population_size,
+            borg_library_path="./libborgms.so",
+            solve_settings={},  # no runtime options by default
+            **kwargs,
+        )
+
+    def run(self, max_evaluations: int):
+        from borg import Borg, Configuration
+
+        if self.borg_library_path:
+            Configuration.setBorgLibrary(self.borg_library_path)
+        if self.seed is not None:
+            Configuration.seed(self.seed)
+
+        nvars = self.problem.nvars
+        nobjs = self.problem.nobjs
+        nconstr = getattr(self.problem, "nconstr", 0)
+
+        callback = self._make_callback()
+        borg = Borg(nvars, nobjs, nconstr, callback)
+
+        self._set_bounds(borg)
+        borg.setEpsilons(*self.epsilons)
+
+        # Run MS (islands=1)
+        try:
+            Configuration.startMPI()
+            borg_result = borg.solveMPI(islands=1, maxEvaluations=int(max_evaluations))
+        finally:
+            Configuration.stopMPI()
+
+        # Collect results (only one rank returns a non-None result)
+        self.result = []
+        if borg_result is not None:
+            for s_borg in borg_result:
+                sol = Solution(self.problem)
+                sol.variables = list(s_borg.getVariables())
+                sol.objectives = list(s_borg.getObjectives())
+                if nconstr:
+                    sol.constraints = list(s_borg.getConstraints())
+                self.result.append(sol)
+            self.nfe = int(max_evaluations)
+        else:
+            self.nfe = 0
+
+        self.archive = _ArchiveView(self.result, improvements=len(self.result))
+        self.algorithm = _AlgorithmStub(self.archive)
+
+
+class MMBorgMOEA(BorgMOEA):
+    """Multi‑Master Borg: requires MPI and P = islands*(K+1)+1 ranks."""
+
+    def __init__(self, problem, epsilons, population_size=None, **kwargs):
+        import os
+
+        islands = int(os.environ.get("BORG_ISLANDS", "2"))  # override via env var
+        # store islands in solve_settings if you want to read later (not required here)
+        super().__init__(
+            problem,
+            epsilons,
+            population_size=population_size,
+            borg_library_path="./libborgmm.so",
+            solve_settings={"islands": islands},
+            **kwargs,
+        )
+        self._islands = islands
+
+    def run(self, max_evaluations: int):
+        from borg import Borg, Configuration
+
+        if self.borg_library_path:
+            Configuration.setBorgLibrary(self.borg_library_path)
+        if self.seed is not None:
+            Configuration.seed(self.seed)
+
+        nvars = self.problem.nvars
+        nobjs = self.problem.nobjs
+        nconstr = getattr(self.problem, "nconstr", 0)
+
+        callback = self._make_callback()
+        borg = Borg(nvars, nobjs, nconstr, callback)
+
+        self._set_bounds(borg)
+        borg.setEpsilons(*self.epsilons)
+
+        # Run MM with islands = self._islands
+        try:
+            Configuration.startMPI()
+            borg_result = borg.solveMPI(
+                islands=self._islands, maxEvaluations=int(max_evaluations)
+            )
+        finally:
+            Configuration.stopMPI()
+
+        # Collect results (only one rank returns a non-None result)
+        self.result = []
+        if borg_result is not None:
+            for s_borg in borg_result:
+                sol = Solution(self.problem)
+                sol.variables = list(s_borg.getVariables())
+                sol.objectives = list(s_borg.getObjectives())
+                if nconstr:
+                    sol.constraints = list(s_borg.getConstraints())
+                self.result.append(sol)
+            self.nfe = int(max_evaluations)
+        else:
+            self.nfe = 0
+
+        self.archive = _ArchiveView(self.result, improvements=len(self.result))
+        self.algorithm = _AlgorithmStub(self.archive)
 
 
 def run_optimization_adaptive(
@@ -194,27 +315,11 @@ def run_optimization_adaptive(
             variable_name="welfare",
             kind=ScalarOutcome.MINIMIZE,
         ),
-        # ScalarOutcome(
-        #     "years_above_temperature_threshold",
-        #     variable_name="years_above_threshold",
-        #     kind=ScalarOutcome.MINIMIZE,
-        # ),
         ScalarOutcome(
             "fraction_above_threshold",
             variable_name="fraction_above_threshold",
             kind=ScalarOutcome.MINIMIZE,
         ),
-        # NOTE : Temporarily commented out for bi-objective optimization
-        # ScalarOutcome(
-        #     "welfare_loss_damage",
-        #     variable_name="welfare_loss_damage",
-        #     kind=ScalarOutcome.MAXIMIZE,
-        # ),
-        # ScalarOutcome(
-        #     "welfare_loss_abatement",
-        #     variable_name="welfare_loss_abatement",
-        #     kind=ScalarOutcome.MAXIMIZE,
-        # ),
     ]
 
     reference_scenario = Scenario(
@@ -229,24 +334,30 @@ def run_optimization_adaptive(
     directory_name = os.path.join(
         datapath, f"{social_welfare_function.value[1]}_{date}_{seed}"
     )
-    # Create a directory inside ./data/ with name output_{date} to save the results
-    os.makedirs(directory_name, exist_ok=True)
-    # Set the directory path to a variable
 
-    convergence_metrics = [
-        ArchiveLogger(
-            directory_name,
-            [l.name for l in model.levers],
-            [o.name for o in model.outcomes],
-            base_filename=filename,
-        ),
-        EpsilonProgress(),
-    ]
+    # Gate I/O to rank 0 to avoid race conditions and missing temp files
+    rank = _mpi_rank()
+
+    if rank == 0:
+        os.makedirs(directory_name, exist_ok=True)
+        convergence_metrics = [
+            ArchiveLogger(
+                directory_name,
+                [l.name for l in model.levers],
+                [o.name for o in model.outcomes],
+                base_filename=filename,
+            ),
+            EpsilonProgress(),
+        ]
+    else:
+        # No convergence/logging on non-master ranks
+        convergence_metrics = []
+
     algorithm = None
     if optimizer == Optimizer.EpsNSGAII:
         algorithm = EpsNSGAII
     elif optimizer == Optimizer.BorgMOEA:
-        algorithm = BorgMOEA
+        algorithm = MMBorgMOEA
 
     set_ema_context(model=model, reference=reference_scenario)
 
@@ -287,281 +398,17 @@ def run_optimization_adaptive(
             )
 
 
-#######################################################################################################################################################
-# Deprecated
-#######################################################################################################################################################
+def _mpi_rank() -> int:
+    import os
 
-
-def run_optimization_static(nfe=5000, filename=None, folder=None):
-
-    # TODO: Update this model wrapper. [Deprecated]
-
-    model = Model("JUSTICE", function=model_wrapper_static_optimization)
-
-    # Define constants, uncertainties and levers
-    model.constants = [
-        Constant("n_regions", len(data_loader.REGION_LIST)),
-        Constant("n_timesteps", len(time_horizon.model_time_horizon)),
-        Constant("elasticity_of_marginal_utility_of_consumption", 1.45),
-        Constant("pure_rate_of_social_time_preference", 0.015),
-    ]
-
-    # Speicify uncertainties
-    model.uncertainties = [
-        CategoricalParameter(
-            "ssp_rcp_scenario", (0, 1, 2, 3, 4, 5, 6, 7)
-        ),  # 8 SSP-RCP scenario combinations
-        CategoricalParameter("inequality_aversion", (0.0, 0.5, 1.45, 2.0)),
-        # Add Discount rate as a RealParameter Uncertainty
-        # RealParameter("pure_rate_of_social_time_preference", 0.0001, 0.020),
-    ]
-
-    # Set the model levers, which are the RBF parameters
-
-    ecr_levers = []
-    for i in range(len(data_loader.REGION_LIST)):
-        for j in range(len(time_horizon.model_time_horizon)):
-            ecr_levers.append(
-                RealParameter(f"emissions_control_rate {i} {j}", 0.00, 1.0)
-            )
-
-    # Set the model levers
-    model.levers = ecr_levers
-
-    model.outcomes = [
-        ScalarOutcome(
-            "mean_welfare_utilitarian",
-            variable_name="welfare_utilitarian",
-            kind=ScalarOutcome.MAXIMIZE,
-        ),
-    ]
-
-    reference_scenario = Scenario(
-        "reference",
-        ssp_rcp_scenario=2,
-        inequality_aversion=0.0,
-    )
-
-    convergence_metrics = [
-        ArchiveLogger(
-            "./data/output",
-            [l.name for l in model.levers],
-            [o.name for o in model.outcomes],
-            base_filename="JUSTICE_dps_archive.tar.gz",
-        ),
-        EpsilonProgress(),
-    ]
-
-    with SequentialEvaluator(model) as evaluator:
-        results = evaluator.optimize(
-            searchover="levers",
-            nfe=nfe,
-            epsilons=[0.01] * len(model.outcomes),  # * len(model.outcomes)
-            reference=reference_scenario,
-            convergence=convergence_metrics,
-        )
-
-
-#######################################################################################################################################################
-
-
-def perform_exploratory_analysis(number_of_experiments=10, filename=None, folder=None):
-    # TODO: Update this model wrapper. [Deprecated]
-    # Instantiate the model
-    model = Model("JUSTICE", function=model_wrapper)
-    model.constants = [
-        Constant("n_regions", len(data_loader.REGION_LIST)),
-        Constant("n_timesteps", len(time_horizon.model_time_horizon)),
-    ]
-
-    # Speicify uncertainties
-    model.uncertainties = [
-        CategoricalParameter(
-            "ssp_rcp_scenario", (0, 1, 2, 3, 4, 5, 6, 7)
-        ),  # 8 SSP-RCP scenario combinations
-        RealParameter("elasticity_of_marginal_utility_of_consumption", 0.0, 2.0),
-        RealParameter(
-            "pure_rate_of_social_time_preference", 0.0001, 0.020
-        ),  # 0.1 to 3% in RICE50 gazzotti2
-        RealParameter("inequality_aversion", 0.0, 2.0),  # 0.2 -2.5
-    ]
-
-    # Set model levers - has to be 2D array of shape (57, 286) 57 regions and 286 timesteps
-
-    # TODO temporarily commented out
-    # sr_levers = []
-    # ecr_levers = []
-    # for i in range(len(data_loader.REGION_LIST)):
-    #     for j in range(len(time_horizon.model_time_horizon)):
-    #         sr_levers.append(RealParameter(f"savings_rate {i} {j}", 0.05, 0.5))
-    #         ecr_levers.append(
-    #             RealParameter(f"emissions_control_rate {i} {j}", 0.00, 1.0)
-    #         )
-
-    # model.levers = sr_levers + ecr_levers
-
-    # Specify outcomes #All outcomes have shape (57, 286, 1001) except global_temperature which has shape (286, 1001)
-    model.outcomes = [
-        ArrayOutcome(
-            "mean_net_economic_output",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="net_economic_output",
-        ),
-        ArrayOutcome(
-            "5p_net_economic_output",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="net_economic_output",
-        ),
-        ArrayOutcome(
-            "95p_net_economic_output",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="net_economic_output",
-        ),
-        ArrayOutcome(
-            "mean_consumption_per_capita",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="consumption_per_capita",
-        ),
-        ArrayOutcome(
-            "5p_consumption_per_capita",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="consumption_per_capita",
-        ),
-        ArrayOutcome(
-            "95p_consumption_per_capita",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="consumption_per_capita",
-        ),
-        ArrayOutcome(
-            "mean_emissions",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="emissions",
-        ),
-        ArrayOutcome(
-            "5p_emissions",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="emissions",
-        ),
-        ArrayOutcome(
-            "95p_emissions",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="emissions",
-        ),
-        ArrayOutcome(
-            "mean_economic_damage",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="economic_damage",
-        ),
-        ArrayOutcome(
-            "5p_economic_damage",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="economic_damage",
-        ),
-        ArrayOutcome(
-            "95p_economic_damage",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="economic_damage",
-        ),
-        ArrayOutcome(
-            "mean_abatement_cost",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="abatement_cost",
-        ),
-        ArrayOutcome(
-            "5p_abatement_cost",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="abatement_cost",
-        ),
-        ArrayOutcome(
-            "95p_abatement_cost",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="abatement_cost",
-        ),
-        ArrayOutcome(
-            "mean_disentangled_utility",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="disentangled_utility",
-        ),
-        ArrayOutcome(
-            "5p_disentangled_utility",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="disentangled_utility",
-        ),
-        ArrayOutcome(
-            "95p_disentangled_utility",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="disentangled_utility",
-        ),
-        ArrayOutcome(
-            "mean_consumption",
-            function=functools.partial(np.mean, axis=2),
-            variable_name="consumption",
-        ),
-        ArrayOutcome(
-            "5p_consumption",
-            function=functools.partial(np.percentile, q=5, axis=2),
-            variable_name="consumption",
-        ),
-        ArrayOutcome(
-            "95p_consumption",
-            function=functools.partial(np.percentile, q=95, axis=2),
-            variable_name="consumption",
-        ),
-        # ArrayOutcome("consumption", function=functools.partial(np.mean, axis=2)),
-        # ArrayOutcome("welfare_utilitarian"),  # (286, 1001) #, function=get_mean_2D
-        # ArrayOutcome("consumption_per_capita", function=apply_statistical_functions),
-        # ArrayOutcome("emissions", function=apply_statistical_functions),
-        ArrayOutcome(
-            "mean_global_temperature",
-            function=functools.partial(np.mean, axis=1),
-            variable_name="global_temperature",
-        ),  # (286, 1001)
-        ArrayOutcome(
-            "5p_global_temperature",
-            function=functools.partial(np.percentile, q=5, axis=1),
-            variable_name="global_temperature",
-        ),  # (286, 1001)
-        ArrayOutcome(
-            "95p_global_temperature",
-            function=functools.partial(np.percentile, q=95, axis=1),
-            variable_name="global_temperature",
-        ),
-        ArrayOutcome(
-            "mean_welfare_utilitarian",
-            function=functools.partial(np.mean, axis=1),
-            variable_name="welfare_utilitarian",
-        ),  # (286, 1001)
-        ArrayOutcome(
-            "5p_welfare_utilitarian",
-            function=functools.partial(np.percentile, q=5, axis=1),
-            variable_name="welfare_utilitarian",
-        ),  # (286, 1001)
-        ArrayOutcome(
-            "95p_welfare_utilitarian",
-            function=functools.partial(np.percentile, q=95, axis=1),
-            variable_name="welfare_utilitarian",
-        ),  # (286, 1001)
-        # (286, 1001)
-        # ArrayOutcome("economic_damage", function=apply_statistical_functions),
-        # ArrayOutcome("abatement_cost", function=apply_statistical_functions),
-        # ArrayOutcome("disentangled_utility", function=apply_statistical_functions),
-    ]
-
-    with MultiprocessingEvaluator(model) as evaluator:
-        results = evaluator.perform_experiments(
-            scenarios=number_of_experiments,
-            reporting_frequency=100,  # policies=2,TODO temporarily commented out
-        )
-
-        if filename is None:
-            file_name = f"optimal_open_exploration_{number_of_experiments}.tar.gz"
-
-        if folder is None:
-            target_directory = os.path.join(os.getcwd(), "data/output", file_name)
-        else:
-            target_directory = os.path.join(folder, file_name)
-
-        save_results(results, file_name=target_directory)
+    for k in ("OMPI_COMM_WORLD_RANK", "PMI_RANK", "SLURM_PROCID", "MPI_RANK"):
+        v = os.environ.get(k)
+        if v is not None:
+            try:
+                return int(v)
+            except ValueError:
+                pass
+    return 0
 
 
 if __name__ == "__main__":
@@ -586,11 +433,11 @@ if __name__ == "__main__":
     # )
     run_optimization_adaptive(
         config_path=config_path,
-        nfe=5,
+        nfe=10,
         swf=0,
         seed=seed,
         datapath="./data",
-        optimizer=Optimizer.BorgMOEA, # Optimizer.EpsNSGAII,  # Optimizer.BorgMOEA,
-        population_size=50, 
+        optimizer=Optimizer.BorgMOEA,  # Optimizer.EpsNSGAII,  # Optimizer.BorgMOEA,
+        population_size=100,
         evaluator=Evaluator.SequentialEvaluator,
     )
