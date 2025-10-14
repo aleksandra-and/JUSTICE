@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any, Iterable
 from platypus import Algorithm, Problem, Solution, Real, Integer, Binary
+import os
 
 # Global EMA context, set once by user code
 _EMA_CONTEXT: Dict[str, Any] = {
@@ -119,69 +120,8 @@ class BorgMOEA(Algorithm):
         problem = self.problem
         nconstr = getattr(problem, "nconstr", 0)
 
-        def eval_with_problem_function(x_list):
-            f = getattr(problem, "function", None)
-            if callable(f):
-                return f(x_list)
-            return None
-
-        def eval_with_evaluator(x_list):
-            """
-            Evaluate a single candidate via evaluator.perform_experiments(policies=[Policy(..)], [scenarios=[reference]]).
-            Returns objectives list or (objs, cons).
-            """
-            if self.evaluator is None:
-                return None
-
-            # Build Policy using lever names from ctx
-            policy_obj = None
-            try:
-                if self._lever_names and len(self._lever_names) == len(x_list):
-                    from ema_workbench import Policy
-
-                    policy_obj = Policy(
-                        "borg-policy", **dict(zip(self._lever_names, x_list))
-                    )
-                else:
-                    return None  # cannot map without lever names
-            except Exception:
-                return None
-
-            meth = getattr(self.evaluator, "perform_experiments", None)
-            if not callable(meth):
-                return None
-
-            try:
-                # Call with 1 policy, and optionally 1 scenario
-                if self.reference is not None:
-                    ret = meth(policies=[policy_obj], scenarios=[self.reference])
-                else:
-                    ret = meth(policies=[policy_obj])
-
-                # Normalize return: EMA typically returns dict of outcome arrays
-                if isinstance(ret, tuple) and len(ret) == 2:
-                    _, outcomes = ret
-                else:
-                    outcomes = ret
-
-                if isinstance(outcomes, dict):
-                    names = self._outcome_names or list(outcomes.keys())
-                    # Single run -> take first (0) element per outcome
-                    objs = [float(outcomes[n][0]) for n in names[: problem.nobjs]]
-                    return objs
-                # Fallback: already a list-like objective vector
-                if isinstance(outcomes, (list, tuple)):
-                    return list(outcomes)
-                # Scalar objective
-                try:
-                    return [float(outcomes)]
-                except Exception:
-                    return None
-            except Exception:
-                return None
-
         def cb(*x):
-            # Cast Borg doubles into Platypus variable types
+            # Cast Borg doubles into Platypus types
             casted_vars = []
             for val, t in zip(x, problem.types):
                 if isinstance(t, Integer):
@@ -204,53 +144,19 @@ class BorgMOEA(Algorithm):
                         v = min(hi, v)
                     casted_vars.append(v)
 
-            # 1) problem.function if present
-            objs_or_tuple = eval_with_problem_function(casted_vars)
+            # Evaluate via Platypus/EMA Problem
+            s = Solution(problem)
+            s.variables = casted_vars
+            problem.evaluate(s)
 
-            # 2) EMA evaluator path
-            if objs_or_tuple is None:
-                objs_or_tuple = eval_with_evaluator(casted_vars)
-
-            # 3) Platypus evaluate fallback if function exists
-            if objs_or_tuple is None:
-                f = getattr(problem, "function", None)
-                if callable(f):
-                    s = Solution(problem)
-                    s.variables = casted_vars
-                    problem.evaluate(s)
-                    objs_or_tuple = list(s.objectives)
-                    cons = list(getattr(s, "constraints", [])) if nconstr else None
-                    if nconstr:
-                        return (objs_or_tuple, cons or [0.0] * nconstr)
-                    else:
-                        return objs_or_tuple
-
-            if objs_or_tuple is None:
-                raise RuntimeError(
-                    "Borg adapter could not evaluate the objective function. "
-                    "Set EMA context via set_ema_context(model, reference) so we can call evaluator.perform_experiments."
-                )
-
-            # Normalize return
-            if isinstance(objs_or_tuple, tuple):
-                objectives = objs_or_tuple[0] if len(objs_or_tuple) > 0 else None
-                constraints = objs_or_tuple[1] if len(objs_or_tuple) > 1 else None
-            elif isinstance(objs_or_tuple, dict):
-                names = self._outcome_names or list(objs_or_tuple.keys())
-                objectives = [float(objs_or_tuple[n]) for n in names[: problem.nobjs]]
-                constraints = None
-            else:
-                objectives = objs_or_tuple
-                constraints = None
-
-            if objectives is None:
-                raise RuntimeError("Evaluator returned no objectives")
-
+            # Return objectives (and constraints if present)
             if nconstr:
-                constraints = constraints or [0.0] * nconstr
-                return (list(objectives), list(constraints))
+                cons = list(getattr(s, "constraints", []) or [])
+                if len(cons) < nconstr:
+                    cons += [0.0] * (nconstr - len(cons))
+                return (list(s.objectives), cons)
             else:
-                return list(objectives)
+                return list(s.objectives)
 
         return cb
 

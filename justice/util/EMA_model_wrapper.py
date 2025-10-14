@@ -156,11 +156,6 @@ def model_wrapper_emodps(**kwargs):
     # Calculate the mean of ["welfare"] over the 1000 ensembles
     welfare = np.abs(datasets["welfare"])
 
-    # Get the years above temperature threshold
-    # years_above_threshold = years_above_temperature_threshold(
-    #     datasets["global_temperature"], 2.0
-    # )
-
     # Calculate the fraction of ensemble above the temperature threshold temperature, temperature_year_index, threshold
     fraction_above_threshold = fraction_of_ensemble_above_threshold(
         temperature=datasets["global_temperature"],
@@ -168,27 +163,10 @@ def model_wrapper_emodps(**kwargs):
         threshold=2.0,
     )
 
-    # TODO: Temporarily commented out for bi-objective optimization
-
-    # Transform the damage cost per capita to welfare loss value
-    # _, _, _, welfare_loss_damage = model.welfare_function.calculate_welfare(
-    #     datasets["damage_cost_per_capita"], welfare_loss=True
-    # )
-    # welfare_loss_damage = np.abs(welfare_loss_damage)
-
-    # # Transform the abatement cost to welfare loss value
-    # _, _, _, welfare_loss_abatement = model.welfare_function.calculate_welfare(
-    #     datasets["abatement_cost_per_capita"], welfare_loss=True
-    # )
-    # welfare_loss_abatement = np.abs(welfare_loss_abatement)
-
     return (
         welfare,
         fraction_above_threshold,
-        # years_above_threshold,
-        # welfare_loss_damage,
-        # welfare_loss_abatement,
-    )  # ,
+    )
 
 
 def model_wrapper(**kwargs):

@@ -9,6 +9,12 @@ import json
 # from solvers.moea.borgMOEA import BorgMOEA
 from ema_workbench.em_framework.optimization import EpsNSGAII
 
+from ema_workbench import Policy
+from platypus import Solution, Integer, Binary
+from borg_platypus_adapter import _ArchiveView, _AlgorithmStub, _EMA_CONTEXT
+import numpy as np
+
+
 # Suppress numpy version warnings
 import warnings
 
@@ -66,15 +72,101 @@ class MSBorgMOEA(BorgMOEA):
     """Master–Slave Borg: requires MPI and >= 2 ranks."""
 
     def __init__(self, problem, epsilons, population_size=None, **kwargs):
-        # use master–slave library by default
         super().__init__(
             problem,
             epsilons,
             population_size=population_size,
             borg_library_path="./libborgms.so",
-            solve_settings={},  # no runtime options by default
+            solve_settings={},
             **kwargs,
         )
+
+    def _make_callback(self):
+        problem = self.problem
+        nconstr = getattr(problem, "nconstr", 0)
+
+        def cb(*x):
+            # Cast Borg variables to Platypus types
+            casted_vars = []
+            for val, t in zip(x, problem.types):
+                if isinstance(t, Integer):
+                    lo, hi = t.min_value, t.max_value
+                    v = int(round(val))
+                    if lo is not None:
+                        v = max(lo, v)
+                    if hi is not None:
+                        v = min(hi, v)
+                    casted_vars.append(v)
+                elif isinstance(t, Binary):
+                    casted_vars.append(1 if val >= 0.5 else 0)
+                else:
+                    lo = getattr(t, "min_value", None)
+                    hi = getattr(t, "max_value", None)
+                    v = float(val)
+                    if lo is not None:
+                        v = max(lo, v)
+                    if hi is not None:
+                        v = min(hi, v)
+                    casted_vars.append(v)
+
+            # Build kwargs from EMA context (constants + scenario + levers)
+            mdl = _EMA_CONTEXT.get("model")
+            ref = _EMA_CONTEXT.get("reference")
+            if mdl is None:
+                raise RuntimeError(
+                    "EMA context model not set. Call set_ema_context(model, reference) before optimize."
+                )
+
+            const_list = getattr(mdl, "constants", [])
+            base_kwargs = {c.name: c.value for c in const_list}
+
+            # Scenario: prefer EMA reference Scenario, else the stored index
+            if ref is not None and hasattr(ref, "ssp_rcp_scenario"):
+                base_kwargs["ssp_rcp_scenario"] = ref.ssp_rcp_scenario
+            else:
+                idx = _EMA_CONTEXT.get("reference_ssp_rcp_scenario_index", None)
+                if idx is not None:
+                    base_kwargs["ssp_rcp_scenario"] = idx
+
+            # Levers by name
+            if self._lever_names is None or len(self._lever_names) != len(casted_vars):
+                raise RuntimeError(
+                    f"Lever count mismatch: nvars={len(casted_vars)} vs lever_names={len(self._lever_names) if self._lever_names else None}"
+                )
+            lever_map = {name: val for name, val in zip(self._lever_names, casted_vars)}
+
+            kwargs = {**base_kwargs, **lever_map}
+
+            # Direct call to your JUSTICE wrapper
+            out = model_wrapper_emodps(**kwargs)
+
+            # Normalize to two floats
+            if isinstance(out, tuple):
+                w = out[0] if len(out) > 0 else 0.0
+                frac = out[1] if len(out) > 1 else 0.0
+            elif isinstance(out, dict):
+                names = self._outcome_names or list(out.keys())
+                w = out.get(names[0], 0.0)
+                frac = out.get(names[1], 0.0) if len(names) > 1 else 0.0
+            else:
+                w, frac = out, 0.0
+
+            try:
+                w = float(np.asarray(w).mean())
+            except Exception:
+                w = float(w)
+            try:
+                frac = float(np.asarray(frac).mean())
+            except Exception:
+                frac = float(frac)
+
+            objs = [w, frac]
+            if nconstr:
+                return (objs, [0.0] * nconstr)
+            else:
+                return objs
+
+        return cb
 
     def run(self, max_evaluations: int):
         from borg import Borg, Configuration
@@ -94,7 +186,6 @@ class MSBorgMOEA(BorgMOEA):
         self._set_bounds(borg)
         borg.setEpsilons(*self.epsilons)
 
-        # Optional: show epsilons once on rank 0
         if _mpi_rank() == 0:
             print(f"[MSBorgMOEA] epsilons = {self.epsilons}", flush=True)
 
@@ -122,6 +213,10 @@ class MSBorgMOEA(BorgMOEA):
         self.archive = _ArchiveView(self.result, improvements=len(self.result))
         self.algorithm = _AlgorithmStub(self.archive)
 
+    def step(self):
+        # required by Platypus; not used because we override run()
+        return
+
 
 class MMBorgMOEA(BorgMOEA):
     """Multi‑Master Borg: requires MPI and P = islands*(K+1)+1 ranks."""
@@ -129,8 +224,7 @@ class MMBorgMOEA(BorgMOEA):
     def __init__(self, problem, epsilons, population_size=None, **kwargs):
         import os
 
-        islands = int(os.environ.get("BORG_ISLANDS", "2"))  # override via env var
-        # store islands in solve_settings if you want to read later (not required here)
+        islands = int(os.environ.get("BORG_ISLANDS", "2"))
         super().__init__(
             problem,
             epsilons,
@@ -140,6 +234,93 @@ class MMBorgMOEA(BorgMOEA):
             **kwargs,
         )
         self._islands = islands
+
+    def _make_callback(self):
+        problem = self.problem
+        nconstr = getattr(problem, "nconstr", 0)
+
+        def cb(*x):
+            # Cast Borg variables to Platypus types
+            casted_vars = []
+            for val, t in zip(x, problem.types):
+                if isinstance(t, Integer):
+                    lo, hi = t.min_value, t.max_value
+                    v = int(round(val))
+                    if lo is not None:
+                        v = max(lo, v)
+                    if hi is not None:
+                        v = min(hi, v)
+                    casted_vars.append(v)
+                elif isinstance(t, Binary):
+                    casted_vars.append(1 if val >= 0.5 else 0)
+                else:
+                    lo = getattr(t, "min_value", None)
+                    hi = getattr(t, "max_value", None)
+                    v = float(val)
+                    if lo is not None:
+                        v = max(lo, v)
+                    if hi is not None:
+                        v = min(hi, v)
+                    casted_vars.append(v)
+
+            # Build kwargs from EMA context (constants + scenario + levers)
+            mdl = _EMA_CONTEXT.get("model")
+            ref = _EMA_CONTEXT.get("reference")
+            if mdl is None:
+                raise RuntimeError(
+                    "EMA context model not set. Call set_ema_context(model, reference) before optimize."
+                )
+
+            const_list = getattr(mdl, "constants", [])
+            base_kwargs = {c.name: c.value for c in const_list}
+
+            # Scenario: prefer EMA reference Scenario, else the stored index
+            if ref is not None and hasattr(ref, "ssp_rcp_scenario"):
+                base_kwargs["ssp_rcp_scenario"] = ref.ssp_rcp_scenario
+            else:
+                idx = _EMA_CONTEXT.get("reference_ssp_rcp_scenario_index", None)
+                if idx is not None:
+                    base_kwargs["ssp_rcp_scenario"] = idx
+
+            # Levers by name
+            if self._lever_names is None or len(self._lever_names) != len(casted_vars):
+                raise RuntimeError(
+                    f"Lever count mismatch: nvars={len(casted_vars)} vs lever_names={len(self._lever_names) if self._lever_names else None}"
+                )
+            lever_map = {name: val for name, val in zip(self._lever_names, casted_vars)}
+
+            kwargs = {**base_kwargs, **lever_map}
+
+            # Direct call to your JUSTICE wrapper
+            out = model_wrapper_emodps(**kwargs)
+
+            # Normalize to two floats
+            if isinstance(out, tuple):
+                w = out[0] if len(out) > 0 else 0.0
+                frac = out[1] if len(out) > 1 else 0.0
+            elif isinstance(out, dict):
+                names = self._outcome_names or list(out.keys())
+                w = out.get(names[0], 0.0)
+                frac = out.get(names[1], 0.0) if len(names) > 1 else 0.0
+            else:
+                w, frac = out, 0.0
+
+            try:
+                w = float(np.asarray(w).mean())
+            except Exception:
+                w = float(w)
+            try:
+                frac = float(np.asarray(frac).mean())
+            except Exception:
+                frac = float(frac)
+
+            objs = [w, frac]
+            if nconstr:
+                return (objs, [0.0] * nconstr)
+            else:
+                return objs
+
+        return cb
 
     def run(self, max_evaluations: int):
         from borg import Borg, Configuration
@@ -164,13 +345,17 @@ class MMBorgMOEA(BorgMOEA):
                 f"[MMBorgMOEA] epsilons = {self.epsilons}, islands = {self._islands}",
                 flush=True,
             )
+            print(
+                f"[MMBorgMOEA] nvars={self.problem.nvars}, lever_names={len(self._lever_names) if self._lever_names else None}",
+                flush=True,
+            )
 
         try:
             Configuration.startMPI()
             borg_result = borg.solveMPI(
                 islands=self._islands,
                 maxEvaluations=int(max_evaluations),
-                runtime=b"mm_%d.runtime",  # one file per island
+                runtime=b"mm_%d.runtime",
             )
         finally:
             Configuration.stopMPI()
@@ -190,6 +375,10 @@ class MMBorgMOEA(BorgMOEA):
 
         self.archive = _ArchiveView(self.result, improvements=len(self.result))
         self.algorithm = _AlgorithmStub(self.archive)
+
+    def step(self):
+        # required by Platypus; not used because we override run()
+        return
 
 
 def run_optimization_adaptive(
@@ -370,6 +559,9 @@ def run_optimization_adaptive(
         algorithm = MMBorgMOEA
 
     set_ema_context(model=model, reference=reference_scenario)
+    from borg_platypus_adapter import _EMA_CONTEXT
+
+    _EMA_CONTEXT["reference_ssp_rcp_scenario_index"] = reference_ssp_rcp_scenario_index
 
     if evaluator == Evaluator.MPIEvaluator:
         with MPIEvaluator(model) as _evaluator:  # Use this for HPC
