@@ -244,7 +244,7 @@ class MMBorgMOEA(BorgMOEA):
         nconstr = getattr(problem, "nconstr", 0)
 
         def cb(*x):
-            # Cast Borg variables to Platypus types
+            # Cast Borg variables to plain Python numbers
             casted_vars = []
             for val, t in zip(x, problem.types):
                 if isinstance(t, Integer):
@@ -267,7 +267,7 @@ class MMBorgMOEA(BorgMOEA):
                         v = min(hi, v)
                     casted_vars.append(v)
 
-            # Build kwargs from EMA context (constants + scenario + levers)
+            # Build kwargs from EMA context (constants + reference + lever values)
             mdl = _EMA_CONTEXT.get("model")
             ref = _EMA_CONTEXT.get("reference")
             if mdl is None:
@@ -278,7 +278,6 @@ class MMBorgMOEA(BorgMOEA):
             const_list = getattr(mdl, "constants", [])
             base_kwargs = {c.name: c.value for c in const_list}
 
-            # Scenario: prefer EMA reference Scenario, else the stored index
             if ref is not None and hasattr(ref, "ssp_rcp_scenario"):
                 base_kwargs["ssp_rcp_scenario"] = ref.ssp_rcp_scenario
             else:
@@ -286,22 +285,18 @@ class MMBorgMOEA(BorgMOEA):
                 if idx is not None:
                     base_kwargs["ssp_rcp_scenario"] = idx
 
-            # Levers by name
             if self._lever_names is None or len(self._lever_names) != len(casted_vars):
                 raise RuntimeError(
                     f"Lever count mismatch: nvars={len(casted_vars)} vs lever_names={len(self._lever_names) if self._lever_names else None}"
                 )
             lever_map = {name: val for name, val in zip(self._lever_names, casted_vars)}
-
             kwargs = {**base_kwargs, **lever_map}
 
-            # Direct call to your JUSTICE wrapper
+            # Direct evaluation using JUSTICE model wrapper
             out = model_wrapper_emodps(**kwargs)
 
-            # Normalize to two floats
             if isinstance(out, tuple):
-                w = out[0] if len(out) > 0 else 0.0
-                frac = out[1] if len(out) > 1 else 0.0
+                w, frac = out[0], out[1]
             elif isinstance(out, dict):
                 names = self._outcome_names or list(out.keys())
                 w = out.get(names[0], 0.0)
@@ -309,14 +304,16 @@ class MMBorgMOEA(BorgMOEA):
             else:
                 w, frac = out, 0.0
 
-            try:
-                w = float(np.asarray(w).mean())
-            except Exception:
-                w = float(w)
-            try:
-                frac = float(np.asarray(frac).mean())
-            except Exception:
-                frac = float(frac)
+            w = (
+                float(w)
+                if not isinstance(w, (list, tuple, np.ndarray))
+                else float(np.asarray(w).mean())
+            )
+            frac = (
+                float(frac)
+                if not isinstance(frac, (list, tuple, np.ndarray))
+                else float(np.asarray(frac).mean())
+            )
 
             objs = [w, frac]
             if nconstr:
