@@ -224,6 +224,9 @@ class MMBorgMOEA(BorgMOEA):
     def __init__(self, problem, epsilons, population_size=None, **kwargs):
         import os
 
+        # Ensure no seed is passed up to the base class
+        kwargs.pop("seed", None)
+
         islands = int(os.environ.get("BORG_ISLANDS", "2"))
         super().__init__(
             problem,
@@ -231,6 +234,7 @@ class MMBorgMOEA(BorgMOEA):
             population_size=population_size,
             borg_library_path="./libborgmm.so",
             solve_settings={"islands": islands},
+            seed=None,  # explicitly no seed
             **kwargs,
         )
         self._islands = islands
@@ -327,8 +331,6 @@ class MMBorgMOEA(BorgMOEA):
 
         if self.borg_library_path:
             Configuration.setBorgLibrary(self.borg_library_path)
-        if self.seed is not None:
-            Configuration.seed(self.seed)
 
         nvars = self.problem.nvars
         nobjs = self.problem.nobjs
@@ -345,13 +347,13 @@ class MMBorgMOEA(BorgMOEA):
                 f"[MMBorgMOEA] epsilons = {self.epsilons}, islands = {self._islands}",
                 flush=True,
             )
-            print(
-                f"[MMBorgMOEA] nvars={self.problem.nvars}, lever_names={len(self._lever_names) if self._lever_names else None}",
-                flush=True,
-            )
 
         try:
             Configuration.startMPI()
+
+            # Do NOT set any seed here. Let Borg pick random seeds per rank.
+            # (No Configuration.seed(...) call.)
+
             borg_result = borg.solveMPI(
                 islands=self._islands,
                 maxEvaluations=int(max_evaluations),
@@ -360,6 +362,7 @@ class MMBorgMOEA(BorgMOEA):
         finally:
             Configuration.stopMPI()
 
+        # Convert results
         self.result = []
         if borg_result is not None:
             for s_borg in borg_result:
