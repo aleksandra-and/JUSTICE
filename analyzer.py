@@ -94,14 +94,18 @@ class MSBorgMOEA(BorgMOEA):
         self._set_bounds(borg)
         borg.setEpsilons(*self.epsilons)
 
-        # Run MS (islands=1)
+        # Optional: show epsilons once on rank 0
+        if _mpi_rank() == 0:
+            print(f"[MSBorgMOEA] epsilons = {self.epsilons}", flush=True)
+
         try:
             Configuration.startMPI()
-            borg_result = borg.solveMPI(islands=1, maxEvaluations=int(max_evaluations))
+            borg_result = borg.solveMPI(
+                islands=1, maxEvaluations=int(max_evaluations), runtime=b"ms.runtime"
+            )
         finally:
             Configuration.stopMPI()
 
-        # Collect results (only one rank returns a non-None result)
         self.result = []
         if borg_result is not None:
             for s_borg in borg_result:
@@ -155,16 +159,22 @@ class MMBorgMOEA(BorgMOEA):
         self._set_bounds(borg)
         borg.setEpsilons(*self.epsilons)
 
-        # Run MM with islands = self._islands
+        if _mpi_rank() == 0:
+            print(
+                f"[MMBorgMOEA] epsilons = {self.epsilons}, islands = {self._islands}",
+                flush=True,
+            )
+
         try:
             Configuration.startMPI()
             borg_result = borg.solveMPI(
-                islands=self._islands, maxEvaluations=int(max_evaluations)
+                islands=self._islands,
+                maxEvaluations=int(max_evaluations),
+                runtime=b"mm_%d.runtime",  # one file per island
             )
         finally:
             Configuration.stopMPI()
 
-        # Collect results (only one rank returns a non-None result)
         self.result = []
         if borg_result is not None:
             for s_borg in borg_result:
@@ -209,7 +219,7 @@ def run_optimization_adaptive(
     emission_control_start_year = config["emission_control_start_year"]
     n_rbfs = config["n_rbfs"]
     n_inputs = config["n_inputs"]
-    epsilons = config["epsilons"]
+    epsilons = config["epsilons"]  # Getting the epsilons from the config file
     temperature_year_of_interest = config["temperature_year_of_interest"]
     reference_ssp_rcp_scenario_index = config["reference_ssp_rcp_scenario_index"]
 
