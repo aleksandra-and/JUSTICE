@@ -1,10 +1,16 @@
+"""
+Orchestrates a multi-objective optimization of the JUSTICE model using Borg.
+- Builds the EMA Model (constants, levers, outcomes).
+- Registers the model wrapper with the Borg adapter (direct evaluation).
+- Defines MPI (MS/MM) subclasses that only tweak Borg’s library/settings.
+- Drives EMA’s optimize(...) with convergence metrics (rank 0 only).
+"""
+
 import datetime
 import json
 import os
-import random
 import warnings
 
-import numpy as np
 from ema_workbench import (
     Model,
     RealParameter,
@@ -17,13 +23,12 @@ from ema_workbench import (
     Constant,
     Scenario,
 )
-
-
 from ema_workbench.em_framework.optimization import (
     ArchiveLogger,
     EpsilonProgress,
     EpsNSGAII,
 )
+
 from justice.util.EMA_model_wrapper import model_wrapper_emodps
 from justice.util.data_loader import DataLoader
 from justice.util.enumerations import (
@@ -35,21 +40,21 @@ from justice.util.enumerations import (
     WelfareFunction,
 )
 from justice.util.model_time import TimeHorizon
-from platypus import Solution, Integer, Binary
 
 from borg_platypus_adapter import (
     BorgMOEA,
     set_ema_context,
     _ArchiveView,
     _AlgorithmStub,
-    _EMA_CONTEXT,
 )
+from platypus import Solution
 
-SMALL_NUMBER = 1e-9  # Used to avoid division by zero in RBF calculations
+SMALL_NUMBER = 1e-9
 warnings.filterwarnings("ignore")
 
 
 def _mpi_rank() -> int:
+    """Determine MPI/Slurm rank if present, else 0."""
     for key in ("OMPI_COMM_WORLD_RANK", "PMI_RANK", "SLURM_PROCID", "MPI_RANK"):
         val = os.environ.get(key)
         if val is not None:
@@ -61,7 +66,7 @@ def _mpi_rank() -> int:
 
 
 class MSBorgMOEA(BorgMOEA):
-    """Master–Slave Borg: requires MPI and >= 2 ranks."""
+    """Master–Slave Borg (islands = 1)."""
 
     def __init__(self, problem, epsilons, population_size=None, **kwargs):
         super().__init__(
@@ -70,94 +75,13 @@ class MSBorgMOEA(BorgMOEA):
             population_size=population_size,
             borg_library_path="./libborgms.so",
             solve_settings={},
-            seed=None,
+            seed=None,  # keep Borg's internal RNG
+            direct_evaluation=True,  # use the evaluation function registered in context
             **kwargs,
         )
 
-    def _make_callback(self):
-        problem = self.problem
-        nconstr = getattr(problem, "nconstr", 0)
-
-        def cb(*x):
-            casted_vars = []
-            for val, t in zip(x, problem.types):
-                if isinstance(t, Integer):
-                    lo, hi = t.min_value, t.max_value
-                    v = int(round(val))
-                    if lo is not None:
-                        v = max(lo, v)
-                    if hi is not None:
-                        v = min(hi, v)
-                    casted_vars.append(v)
-                elif isinstance(t, Binary):
-                    casted_vars.append(1 if val >= 0.5 else 0)
-                else:
-                    lo = getattr(t, "min_value", None)
-                    hi = getattr(t, "max_value", None)
-                    v = float(val)
-                    if lo is not None:
-                        v = max(lo, v)
-                    if hi is not None:
-                        v = min(hi, v)
-                    casted_vars.append(v)
-
-            mdl = _EMA_CONTEXT.get("model")
-            ref = _EMA_CONTEXT.get("reference")
-            if mdl is None:
-                raise RuntimeError(
-                    "EMA context model not set. Call set_ema_context(model, reference)."
-                )
-
-            base_kwargs = {c.name: c.value for c in getattr(mdl, "constants", [])}
-
-            if ref is not None and hasattr(ref, "ssp_rcp_scenario"):
-                base_kwargs["ssp_rcp_scenario"] = ref.ssp_rcp_scenario
-            else:
-                idx = _EMA_CONTEXT.get("reference_ssp_rcp_scenario_index")
-                if idx is not None:
-                    base_kwargs["ssp_rcp_scenario"] = idx
-
-            if self._lever_names is None or len(self._lever_names) != len(casted_vars):
-                raise RuntimeError(
-                    f"Lever count mismatch: nvars={len(casted_vars)} "
-                    f"vs lever_names={len(self._lever_names) if self._lever_names else None}"
-                )
-
-            lever_map = {name: val for name, val in zip(self._lever_names, casted_vars)}
-            kwargs = {**base_kwargs, **lever_map}
-
-            out = model_wrapper_emodps(**kwargs)
-
-            if isinstance(out, tuple):
-                w = out[0] if len(out) > 0 else 0.0
-                frac = out[1] if len(out) > 1 else 0.0
-            elif isinstance(out, dict):
-                names = self._outcome_names or list(out.keys())
-                w = out.get(names[0], 0.0)
-                frac = out.get(names[1], 0.0) if len(names) > 1 else 0.0
-            else:
-                w, frac = out, 0.0
-
-            w = (
-                float(np.asarray(w).mean())
-                if isinstance(w, (list, tuple, np.ndarray))
-                else float(w)
-            )
-            frac = (
-                float(np.asarray(frac).mean())
-                if isinstance(frac, (list, tuple, np.ndarray))
-                else float(frac)
-            )
-
-            objs = [w, frac]
-            if nconstr:
-                return (objs, [0.0] * nconstr)
-            else:
-                return objs
-
-        return cb
-
     def run(self, max_evaluations: int):
+        """Run Borg in master–slave MPI mode (islands = 1)."""
         from borg import Borg, Configuration
 
         if self.borg_library_path:
@@ -198,6 +122,7 @@ class MSBorgMOEA(BorgMOEA):
         else:
             self.nfe = 0
 
+        # Update stub
         self.archive = _ArchiveView(self.result, improvements=len(self.result))
         self.algorithm = _AlgorithmStub(self.archive)
 
@@ -206,12 +131,9 @@ class MSBorgMOEA(BorgMOEA):
 
 
 class MMBorgMOEA(BorgMOEA):
-    """Multi-Master Borg: requires P = islands*(K+1)+1 MPI ranks."""
+    """Multi-Master Borg (requires islands*(workers+1)+1 MPI ranks)."""
 
     def __init__(self, problem, epsilons, population_size=None, **kwargs):
-        import os
-
-        kwargs.pop("seed", None)
         islands = int(os.environ.get("BORG_ISLANDS", "2"))
         super().__init__(
             problem,
@@ -220,93 +142,13 @@ class MMBorgMOEA(BorgMOEA):
             borg_library_path="./libborgmm.so",
             solve_settings={"islands": islands},
             seed=None,
+            direct_evaluation=True,
             **kwargs,
         )
         self._islands = islands
 
-    def _make_callback(self):
-        problem = self.problem
-        nconstr = getattr(problem, "nconstr", 0)
-
-        def cb(*x):
-            casted_vars = []
-            for val, t in zip(x, problem.types):
-                if isinstance(t, Integer):
-                    lo, hi = t.min_value, t.max_value
-                    v = int(round(val))
-                    if lo is not None:
-                        v = max(lo, v)
-                    if hi is not None:
-                        v = min(hi, v)
-                    casted_vars.append(v)
-                elif isinstance(t, Binary):
-                    casted_vars.append(1 if val >= 0.5 else 0)
-                else:
-                    lo = getattr(t, "min_value", None)
-                    hi = getattr(t, "max_value", None)
-                    v = float(val)
-                    if lo is not None:
-                        v = max(lo, v)
-                    if hi is not None:
-                        v = min(hi, v)
-                    casted_vars.append(v)
-
-            mdl = _EMA_CONTEXT.get("model")
-            ref = _EMA_CONTEXT.get("reference")
-            if mdl is None:
-                raise RuntimeError(
-                    "EMA context model not set. Call set_ema_context(model, reference)."
-                )
-
-            base_kwargs = {c.name: c.value for c in getattr(mdl, "constants", [])}
-
-            if ref is not None and hasattr(ref, "ssp_rcp_scenario"):
-                base_kwargs["ssp_rcp_scenario"] = ref.ssp_rcp_scenario
-            else:
-                idx = _EMA_CONTEXT.get("reference_ssp_rcp_scenario_index")
-                if idx is not None:
-                    base_kwargs["ssp_rcp_scenario"] = idx
-
-            if self._lever_names is None or len(self._lever_names) != len(casted_vars):
-                raise RuntimeError(
-                    f"Lever count mismatch: nvars={len(casted_vars)} "
-                    f"vs lever_names={len(self._lever_names) if self._lever_names else None}"
-                )
-            lever_map = {name: val for name, val in zip(self._lever_names, casted_vars)}
-            kwargs = {**base_kwargs, **lever_map}
-
-            out = model_wrapper_emodps(**kwargs)
-
-            if isinstance(out, tuple):
-                w = out[0] if len(out) > 0 else 0.0
-                frac = out[1] if len(out) > 1 else 0.0
-            elif isinstance(out, dict):
-                names = self._outcome_names or list(out.keys())
-                w = out.get(names[0], 0.0)
-                frac = out.get(names[1], 0.0) if len(names) > 1 else 0.0
-            else:
-                w, frac = out, 0.0
-
-            w = (
-                float(np.asarray(w).mean())
-                if isinstance(w, (list, tuple, np.ndarray))
-                else float(w)
-            )
-            frac = (
-                float(np.asarray(frac).mean())
-                if isinstance(frac, (list, tuple, np.ndarray))
-                else float(frac)
-            )
-
-            objs = [w, frac]
-            if nconstr:
-                return (objs, [0.0] * nconstr)
-            else:
-                return objs
-
-        return cb
-
     def run(self, max_evaluations: int):
+        """Run Borg in multi-master MPI mode."""
         from borg import Borg, Configuration
 
         if self.borg_library_path:
@@ -372,7 +214,7 @@ def run_optimization_adaptive(
     optimizer=Optimizer.EpsNSGAII,
     evaluator=Evaluator.SequentialEvaluator,
 ):
-
+    """Set up the EMA Model, register evaluation context, and run optimize()."""
     with open(config_path, "r") as file:
         config = json.load(file)
 
@@ -385,7 +227,7 @@ def run_optimization_adaptive(
     n_inputs = config["n_inputs"]
     epsilons = config["epsilons"]
     temperature_year_of_interest = config["temperature_year_of_interest"]
-    reference_ssp_rcp_scenario_index = config["reference_ssp_rcp_scenario_index"]
+    reference_index = config["reference_ssp_rcp_scenario_index"]
     stochastic_run = config["stochastic_run"]
     climate_members = config.get("climate_ensemble_members")
 
@@ -401,17 +243,18 @@ def run_optimization_adaptive(
         data_timestep=data_timestep,
         timestep=timestep,
     )
-    emission_control_start_ts = time_horizon.year_to_timestep(
+    emission_start_ts = time_horizon.year_to_timestep(
         year=emission_control_start_year, timestep=timestep
     )
     temperature_year_index = time_horizon.year_to_timestep(
         year=temperature_year_of_interest, timestep=timestep
     )
 
+    # Set constants (available inside the callback)
     model.constants = [
         Constant("n_regions", len(data_loader.REGION_LIST)),
         Constant("n_timesteps", len(time_horizon.model_time_horizon)),
-        Constant("emission_control_start_timestep", emission_control_start_ts),
+        Constant("emission_control_start_timestep", emission_start_ts),
         Constant("n_rbfs", n_rbfs),
         Constant("n_inputs_rbf", n_inputs),
         Constant("n_outputs_rbf", len(data_loader.REGION_LIST)),
@@ -424,9 +267,8 @@ def run_optimization_adaptive(
         Constant("climate_ensemble_members", climate_members),
     ]
 
-    model.uncertainties = [
-        CategoricalParameter("ssp_rcp_scenario", tuple(range(8))),
-    ]
+    # Single categorical uncertainty
+    model.uncertainties = [CategoricalParameter("ssp_rcp_scenario", tuple(range(8)))]
 
     centers_shape = n_rbfs * n_inputs
     weights_shape = len(data_loader.REGION_LIST) * n_rbfs
@@ -440,6 +282,7 @@ def run_optimization_adaptive(
     ]
     model.levers = centers + radii + weights
 
+    # Two objectives (welfare, fraction above threshold)
     model.outcomes = [
         ScalarOutcome("welfare", variable_name="welfare", kind=ScalarOutcome.MINIMIZE),
         ScalarOutcome(
@@ -449,9 +292,7 @@ def run_optimization_adaptive(
         ),
     ]
 
-    reference_scenario = Scenario(
-        "reference", ssp_rcp_scenario=reference_ssp_rcp_scenario_index
-    )
+    reference_scenario = Scenario("reference", ssp_rcp_scenario=reference_index)
 
     filename = f"{social_welfare_function.value[1]}_{nfe}_{seed}.tar.gz"
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
@@ -481,8 +322,13 @@ def run_optimization_adaptive(
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer}")
 
-    set_ema_context(model=model, reference=reference_scenario)
-    _EMA_CONTEXT["reference_ssp_rcp_scenario_index"] = reference_ssp_rcp_scenario_index
+    # Register context for the Borg adapter (model, scenario, evaluation function)
+    set_ema_context(
+        model=model,
+        reference=reference_scenario,
+        evaluation=model_wrapper_emodps,
+        reference_index=reference_index,
+    )
 
     if evaluator == Evaluator.MPIEvaluator:
         with MPIEvaluator(model) as _evaluator:
@@ -517,15 +363,14 @@ def run_optimization_adaptive(
                 population_size=population_size,
                 algorithm=algorithm_class,
             )
-    return results  # optional; many callers ignore the return value
+    return results
 
 
 if __name__ == "__main__":
-
     config_path = "analysis/normative_uncertainty_optimization.json"
 
     if _mpi_rank() != 0:
-        ema_logging.log_to_stderr(ema_logging.CRITICAL)
+        ema_logging.log_to_stderr(ema_logging.CRITICAL)  # silence non-master ranks
     else:
         ema_logging.log_to_stderr(ema_logging.INFO)
 
