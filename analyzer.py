@@ -6,10 +6,13 @@ Orchestrates a multi-objective optimization of the JUSTICE model using Borg.
 - Drives EMA’s optimize(...) with convergence metrics (rank 0 only).
 """
 
+import csv
 import datetime
 import json
 import os
+import tarfile
 import warnings
+import zipfile
 
 from ema_workbench import (
     Model,
@@ -208,6 +211,125 @@ class MMBorgMOEA(BorgMOEA):
         return
 
 
+def _write_block_csv(header, rows, target_dir, nfe):
+    if not rows:
+        return
+    os.makedirs(target_dir, exist_ok=True)
+    csv_path = os.path.join(target_dir, f"{nfe}.csv")
+    with open(csv_path, "w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _process_runtime_file(runtime_path, header, island_dir):
+    if not os.path.exists(runtime_path):
+        return
+
+    current_nfe = None
+    rows = []
+
+    with open(runtime_path, "r") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            if line == "#":
+                if current_nfe is not None and rows:
+                    _write_block_csv(header, rows, island_dir, current_nfe)
+                current_nfe = None
+                rows = []
+                continue
+
+            if line.startswith("//NFE="):
+                try:
+                    nfe_val = int(line.split("=", 1)[1])
+                except ValueError:
+                    nfe_val = None
+                if current_nfe is not None and rows:
+                    _write_block_csv(header, rows, island_dir, current_nfe)
+                current_nfe = nfe_val
+                rows = []
+                continue
+
+            if line.startswith("//"):
+                continue
+
+            if current_nfe is None:
+                continue
+
+            rows.append(line.split())
+
+    if current_nfe is not None and rows:
+        _write_block_csv(header, rows, island_dir, current_nfe)
+
+
+def _find_final_tar(directory_name, explicit_filename=None):
+    if explicit_filename:
+        candidate = os.path.join(directory_name, explicit_filename)
+        if os.path.isfile(candidate):
+            return candidate
+    for entry in os.listdir(directory_name):
+        if entry.endswith(".tar") or entry.endswith(".tar.gz"):
+            candidate = os.path.join(directory_name, entry)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def _extract_latest_csv_from_tar(tar_path):
+    try:
+        with tarfile.open(tar_path, "r:*") as tar:
+            members = [
+                m for m in tar.getmembers() if m.isfile() and m.name.endswith(".csv")
+            ]
+            if not members:
+                return None
+
+            def _key(member):
+                base = os.path.basename(member.name)
+                digits = "".join(ch for ch in base if ch.isdigit())
+                try:
+                    return int(digits)
+                except ValueError:
+                    return -1
+
+            chosen = max(members, key=_key)
+            extracted = tar.extractfile(chosen)
+            if extracted:
+                return os.path.basename(chosen.name), extracted.read()
+    except (tarfile.TarError, OSError):
+        pass
+    return None
+
+
+def _create_intermediate_archives(directory_name, filename, islands, header):
+    if header is None:
+        return
+    intermediate_root = os.path.join(directory_name, "mm_intermediate")
+    for idx in range(islands):
+        runtime_path = os.path.join(directory_name, f"mm_{idx}.runtime")
+        island_dir = os.path.join(intermediate_root, f"mm_{idx}")
+        _process_runtime_file(runtime_path, header, island_dir)
+    if not os.path.isdir(intermediate_root):
+        return
+    zip_path = os.path.join(directory_name, "mm_intermediate.zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(intermediate_root):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.relpath(full_path, directory_name)
+                zf.write(full_path, arcname)
+        tar_path = _find_final_tar(directory_name, filename)
+        if tar_path:
+            zf.write(tar_path, os.path.basename(tar_path))
+            extracted = _extract_latest_csv_from_tar(tar_path)
+            if extracted:
+                csv_name, data = extracted
+                zf.writestr(os.path.join("final_archive", csv_name), data)
+
+
 def run_optimization_adaptive(
     config_path,
     nfe=None,
@@ -259,7 +381,6 @@ def run_optimization_adaptive(
         year=temperature_year_of_interest, timestep=timestep
     )
 
-    # Set constants (available inside the callback)
     model.constants = [
         Constant("n_regions", len(data_loader.REGION_LIST)),
         Constant("n_timesteps", len(time_horizon.model_time_horizon)),
@@ -276,7 +397,6 @@ def run_optimization_adaptive(
         Constant("climate_ensemble_members", climate_members),
     ]
 
-    # Single categorical uncertainty
     model.uncertainties = [CategoricalParameter("ssp_rcp_scenario", tuple(range(8)))]
 
     centers_shape = n_rbfs * n_inputs
@@ -291,7 +411,6 @@ def run_optimization_adaptive(
     ]
     model.levers = centers + radii + weights
 
-    # Two objectives (welfare, fraction above threshold)
     model.outcomes = [
         ScalarOutcome("welfare", variable_name="welfare", kind=ScalarOutcome.MINIMIZE),
         ScalarOutcome(
@@ -309,7 +428,6 @@ def run_optimization_adaptive(
         os.path.join(datapath, f"{social_welfare_function.value[1]}_{timestamp}_{seed}")
     )
 
-    # Ensure every rank writes mm_*.runtime into this run directory
     os.environ["BORG_RUNTIME_DIR"] = directory_name
     os.makedirs(directory_name, exist_ok=True)
 
@@ -334,7 +452,6 @@ def run_optimization_adaptive(
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer}")
 
-    # Register context for the Borg adapter (model, scenario, evaluation function)
     set_ema_context(
         model=model,
         reference=reference_scenario,
@@ -375,6 +492,14 @@ def run_optimization_adaptive(
                 population_size=population_size,
                 algorithm=algorithm_class,
             )
+
+    if rank == 0 and optimizer == Optimizer.BorgMOEA and os.path.isdir(directory_name):
+        header = [lever.name for lever in model.levers] + [
+            outcome.name for outcome in model.outcomes
+        ]
+        islands = int(os.environ.get("BORG_ISLANDS", "2"))
+        _create_intermediate_archives(directory_name, filename, islands, header)
+
     return results
 
 
@@ -382,7 +507,7 @@ if __name__ == "__main__":
     config_path = "analysis/normative_uncertainty_optimization.json"
 
     if _mpi_rank() != 0:
-        ema_logging.log_to_stderr(ema_logging.CRITICAL)  # silence non-master ranks
+        ema_logging.logToStdErr = ema_logging.CRITICAL  # silence non-master ranks
     else:
         ema_logging.log_to_stderr(ema_logging.INFO)
 
