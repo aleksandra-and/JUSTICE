@@ -169,12 +169,21 @@ class MMBorgMOEA(BorgMOEA):
                 flush=True,
             )
 
+        runtime_dir = os.environ.get("BORG_RUNTIME_DIR")
+        if runtime_dir is None:
+            raise RuntimeError(
+                "BORG_RUNTIME_DIR is not set. "
+                "Set this environment variable to the desired output folder before running the optimizer."
+            )
+
+        runtime_template = os.path.join(runtime_dir, "mm_%d.runtime").encode("utf-8")
+
         try:
             Configuration.startMPI()
             borg_result = borg.solveMPI(
                 islands=self._islands,
                 maxEvaluations=int(max_evaluations),
-                runtime=b"mm_%d.runtime",
+                runtime=runtime_template,
             )
         finally:
             Configuration.stopMPI()
@@ -296,13 +305,16 @@ def run_optimization_adaptive(
 
     filename = f"{social_welfare_function.value[1]}_{nfe}_{seed}.tar.gz"
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    directory_name = os.path.join(
-        datapath, f"{social_welfare_function.value[1]}_{timestamp}_{seed}"
+    directory_name = os.path.abspath(
+        os.path.join(datapath, f"{social_welfare_function.value[1]}_{timestamp}_{seed}")
     )
+
+    # Ensure every rank writes mm_*.runtime into this run directory
+    os.environ["BORG_RUNTIME_DIR"] = directory_name
+    os.makedirs(directory_name, exist_ok=True)
 
     rank = _mpi_rank()
     if rank == 0:
-        os.makedirs(directory_name, exist_ok=True)
         convergence = [
             ArchiveLogger(
                 directory_name,
