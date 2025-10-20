@@ -15,6 +15,7 @@ If --archive points to a directory (e.g., mm_intermediate/) instead of a zip fil
 the script works the same way.
 """
 
+
 import argparse
 import os
 import shutil
@@ -37,7 +38,7 @@ def parse_args():
         "--base-name",
         required=True,
         help="Base name for outputs (e.g., UTILITARIAN_50000_17). "
-        "Each island tar will be {base-name}_mm_<island>.tar.gz",
+        "Each island tar will be {base-name}_{island}.tar.gz",
     )
     parser.add_argument(
         "--step",
@@ -51,19 +52,12 @@ def parse_args():
         default=None,
         help="Directory for the output tar.gz files. Default: same as the archive location.",
     )
-    parser.add_argument(
-        "--keep-first",
-        action="store_true",
-        help="Always include the first CSV in each island even if it doesn't match --step.",
-    )
     return parser.parse_args()
 
 
 def extract_if_needed(archive_path: Path) -> Path:
-    """
-    If archive_path is a zip file, extract it to a temp dir and return the mm_intermediate folder.
-    Otherwise, assume it already points to the mm_intermediate directory.
-    """
+    """If archive_path is a zip file, extract it to a temp dir and return the mm_intermediate folder.
+    Otherwise, assume it already points to the mm_intermediate directory."""
     if archive_path.is_file() and archive_path.suffix == ".zip":
         temp_dir = Path(tempfile.mkdtemp(prefix="mm_intermediate_"))
         with zipfile.ZipFile(archive_path, "r") as zf:
@@ -85,26 +79,38 @@ def integer_basename(path: Path):
         return None
 
 
-def select_csvs(csv_files, step, keep_first):
-    """
-    Given a sorted list of CSV file paths, return only those matching the step.
-    Files must have integer stems (e.g., 1000.csv).
-    If keep_first is True, always include the first CSV.
-    """
+def select_csvs(csv_files, step):
+    """Always include the first CSV, then apply the step filter (if step > 0)."""
+    if not csv_files:
+        return []
+
     selected = []
-    for idx, csv_file in enumerate(csv_files):
+    first_csv = csv_files[0]
+    selected.append(first_csv)
+
+    if step <= 0:
+        selected.extend(csv_files[1:])
+        return selected
+
+    for csv_file in csv_files[1:]:
         nfe = integer_basename(csv_file)
         if nfe is None:
             continue
-        if step and nfe % step != 0:
-            if keep_first and idx == 0:
-                selected.append(csv_file)
-            continue
-        selected.append(csv_file)
-    return selected
+        if nfe % step == 0:
+            selected.append(csv_file)
+
+    # Ensure no duplicates and preserve ordering
+    seen = set()
+    unique_selected = []
+    for csv_file in selected:
+        if csv_file not in seen:
+            unique_selected.append(csv_file)
+            seen.add(csv_file)
+
+    return unique_selected
 
 
-def package_mm_island(island_dir, output_dir, base_name, island_idx, step, keep_first):
+def package_mm_island(island_dir, output_dir, base_name, island_idx, step):
     csv_files = sorted(
         [f for f in island_dir.glob("*.csv") if integer_basename(f) is not None],
         key=lambda f: integer_basename(f),
@@ -112,13 +118,14 @@ def package_mm_island(island_dir, output_dir, base_name, island_idx, step, keep_
     if not csv_files:
         print(f"[WARN] No numeric CSV files found in {island_dir}")
         return None
-    chosen = select_csvs(csv_files, step, keep_first)
+
+    chosen = select_csvs(csv_files, step)
     if not chosen:
         print(f"[WARN] Step filter removed all CSVs in {island_dir}; nothing to pack.")
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    archive_name = f"{base_name}_mm_{island_idx}.tar.gz"
+    archive_name = f"{base_name}_{island_idx}.tar.gz"
     tar_path = output_dir / archive_name
 
     with tempfile.TemporaryDirectory(prefix=f"tmp_mm_{island_idx}_") as tmp_root:
@@ -162,7 +169,6 @@ def main():
             base_name=args.base_name,
             island_idx=suffix,
             step=max(args.step, 0),
-            keep_first=args.keep_first,
         )
     print("Done.")
 
