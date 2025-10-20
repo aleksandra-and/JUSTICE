@@ -6,7 +6,6 @@
     "emission_control_start_year": 2025,
     "n_rbfs": 4,
     "n_inputs": 2,
-    "reference_ssp_rcp_scenario_index": 2,
     "epsilons": [
         0.00001,
         0.001

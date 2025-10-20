@@ -10,6 +10,7 @@ if __name__ == "__main__":
     nfe = int(sys.argv[1]) if len(sys.argv) > 1 else 5  # default value 5
     swf = int(sys.argv[2]) if len(sys.argv) > 2 else 0  # default value 0
     seed = int(sys.argv[3]) if len(sys.argv) > 3 else 5000  # default value 5000
+    scenario_index = int(sys.argv[4]) if len(sys.argv) > 4 else 2  # default value 2
 
     # Setting the seed
     random.seed(seed)
@@ -22,5 +23,6 @@ if __name__ == "__main__":
         datapath="./data",
         optimizer=Optimizer.MMBorgMOEA,  # Optimizer.BorgMOEA, Optimizer.EpsNSGAII
         population_size=100,
+        reference_ssp_rcp_scenario_index=scenario_index,
         evaluator=Evaluator.SequentialEvaluator,
     )

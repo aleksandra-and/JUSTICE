@@ -11,7 +11,11 @@ Highlights
 """
 
 from typing import List, Optional, Dict, Any, Iterable
+import os
+import tarfile
 
+import csv
+import zipfile
 import numpy as np
 from platypus import Algorithm, Problem, Solution, Real, Integer, Binary
 
@@ -24,6 +28,125 @@ _EMA_CONTEXT: Dict[str, Any] = {
     "evaluation": None,
     "reference_index": None,
 }
+
+
+def _write_block_csv(header, rows, target_dir, nfe):
+    if not rows:
+        return
+    os.makedirs(target_dir, exist_ok=True)
+    csv_path = os.path.join(target_dir, f"{nfe}.csv")
+    with open(csv_path, "w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _process_runtime_file(runtime_path, header, island_dir):
+    if not os.path.exists(runtime_path):
+        return
+
+    current_nfe = None
+    rows = []
+
+    with open(runtime_path, "r") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            if line == "#":
+                if current_nfe is not None and rows:
+                    _write_block_csv(header, rows, island_dir, current_nfe)
+                current_nfe = None
+                rows = []
+                continue
+
+            if line.startswith("//NFE="):
+                try:
+                    nfe_val = int(line.split("=", 1)[1])
+                except ValueError:
+                    nfe_val = None
+                if current_nfe is not None and rows:
+                    _write_block_csv(header, rows, island_dir, current_nfe)
+                current_nfe = nfe_val
+                rows = []
+                continue
+
+            if line.startswith("//"):
+                continue
+
+            if current_nfe is None:
+                continue
+
+            rows.append(line.split())
+
+    if current_nfe is not None and rows:
+        _write_block_csv(header, rows, island_dir, current_nfe)
+
+
+def _find_final_tar(directory_name, explicit_filename=None):
+    if explicit_filename:
+        candidate = os.path.join(directory_name, explicit_filename)
+        if os.path.isfile(candidate):
+            return candidate
+    for entry in os.listdir(directory_name):
+        if entry.endswith(".tar") or entry.endswith(".tar.gz"):
+            candidate = os.path.join(directory_name, entry)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def _extract_latest_csv_from_tar(tar_path):
+    try:
+        with tarfile.open(tar_path, "r:*") as tar:
+            members = [
+                m for m in tar.getmembers() if m.isfile() and m.name.endswith(".csv")
+            ]
+            if not members:
+                return None
+
+            def _key(member):
+                base = os.path.basename(member.name)
+                digits = "".join(ch for ch in base if ch.isdigit())
+                try:
+                    return int(digits)
+                except ValueError:
+                    return -1
+
+            chosen = max(members, key=_key)
+            extracted = tar.extractfile(chosen)
+            if extracted:
+                return os.path.basename(chosen.name), extracted.read()
+    except (tarfile.TarError, OSError):
+        pass
+    return None
+
+
+def _create_intermediate_archives(directory_name, filename, islands, header):
+    if header is None:
+        return
+    intermediate_root = os.path.join(directory_name, "mm_intermediate")
+    for idx in range(islands):
+        runtime_path = os.path.join(directory_name, f"mm_{idx}.runtime")
+        island_dir = os.path.join(intermediate_root, f"mm_{idx}")
+        _process_runtime_file(runtime_path, header, island_dir)
+    if not os.path.isdir(intermediate_root):
+        return
+    zip_path = os.path.join(directory_name, "mm_intermediate.zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(intermediate_root):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.relpath(full_path, directory_name)
+                zf.write(full_path, arcname)
+        tar_path = _find_final_tar(directory_name, filename)
+        if tar_path:
+            zf.write(tar_path, os.path.basename(tar_path))
+            extracted = _extract_latest_csv_from_tar(tar_path)
+            if extracted:
+                csv_name, data = extracted
+                zf.writestr(os.path.join("final_archive", csv_name), data)
 
 
 def set_ema_context(

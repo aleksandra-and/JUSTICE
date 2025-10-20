@@ -6,13 +6,12 @@ Orchestrates a multi-objective optimization of the JUSTICE model using Borg.
 - Drives EMA’s optimize(...) with convergence metrics (rank 0 only).
 """
 
-import csv
 import datetime
 import json
 import os
-import tarfile
+import random
 import warnings
-import zipfile
+
 
 from ema_workbench import (
     Model,
@@ -44,11 +43,12 @@ from justice.util.enumerations import (
 )
 from justice.util.model_time import TimeHorizon
 
-from borg_platypus_adapter import (
+from borg_platypus_adapter import (  # TODO put this in  solvers/moea/borg_platypus_adapter.py
     BorgMOEA,
     set_ema_context,
     _ArchiveView,
     _AlgorithmStub,
+    _create_intermediate_archives,
 )
 from platypus import Solution
 
@@ -211,125 +211,6 @@ class MMBorgMOEA(BorgMOEA):
         return
 
 
-def _write_block_csv(header, rows, target_dir, nfe):
-    if not rows:
-        return
-    os.makedirs(target_dir, exist_ok=True)
-    csv_path = os.path.join(target_dir, f"{nfe}.csv")
-    with open(csv_path, "w", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(header)
-        writer.writerows(rows)
-
-
-def _process_runtime_file(runtime_path, header, island_dir):
-    if not os.path.exists(runtime_path):
-        return
-
-    current_nfe = None
-    rows = []
-
-    with open(runtime_path, "r") as fh:
-        for raw_line in fh:
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            if line == "#":
-                if current_nfe is not None and rows:
-                    _write_block_csv(header, rows, island_dir, current_nfe)
-                current_nfe = None
-                rows = []
-                continue
-
-            if line.startswith("//NFE="):
-                try:
-                    nfe_val = int(line.split("=", 1)[1])
-                except ValueError:
-                    nfe_val = None
-                if current_nfe is not None and rows:
-                    _write_block_csv(header, rows, island_dir, current_nfe)
-                current_nfe = nfe_val
-                rows = []
-                continue
-
-            if line.startswith("//"):
-                continue
-
-            if current_nfe is None:
-                continue
-
-            rows.append(line.split())
-
-    if current_nfe is not None and rows:
-        _write_block_csv(header, rows, island_dir, current_nfe)
-
-
-def _find_final_tar(directory_name, explicit_filename=None):
-    if explicit_filename:
-        candidate = os.path.join(directory_name, explicit_filename)
-        if os.path.isfile(candidate):
-            return candidate
-    for entry in os.listdir(directory_name):
-        if entry.endswith(".tar") or entry.endswith(".tar.gz"):
-            candidate = os.path.join(directory_name, entry)
-            if os.path.isfile(candidate):
-                return candidate
-    return None
-
-
-def _extract_latest_csv_from_tar(tar_path):
-    try:
-        with tarfile.open(tar_path, "r:*") as tar:
-            members = [
-                m for m in tar.getmembers() if m.isfile() and m.name.endswith(".csv")
-            ]
-            if not members:
-                return None
-
-            def _key(member):
-                base = os.path.basename(member.name)
-                digits = "".join(ch for ch in base if ch.isdigit())
-                try:
-                    return int(digits)
-                except ValueError:
-                    return -1
-
-            chosen = max(members, key=_key)
-            extracted = tar.extractfile(chosen)
-            if extracted:
-                return os.path.basename(chosen.name), extracted.read()
-    except (tarfile.TarError, OSError):
-        pass
-    return None
-
-
-def _create_intermediate_archives(directory_name, filename, islands, header):
-    if header is None:
-        return
-    intermediate_root = os.path.join(directory_name, "mm_intermediate")
-    for idx in range(islands):
-        runtime_path = os.path.join(directory_name, f"mm_{idx}.runtime")
-        island_dir = os.path.join(intermediate_root, f"mm_{idx}")
-        _process_runtime_file(runtime_path, header, island_dir)
-    if not os.path.isdir(intermediate_root):
-        return
-    zip_path = os.path.join(directory_name, "mm_intermediate.zip")
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(intermediate_root):
-            for fname in files:
-                full_path = os.path.join(root, fname)
-                arcname = os.path.relpath(full_path, directory_name)
-                zf.write(full_path, arcname)
-        tar_path = _find_final_tar(directory_name, filename)
-        if tar_path:
-            zf.write(tar_path, os.path.basename(tar_path))
-            extracted = _extract_latest_csv_from_tar(tar_path)
-            if extracted:
-                csv_name, data = extracted
-                zf.writestr(os.path.join("final_archive", csv_name), data)
-
-
 def run_optimization_adaptive(
     config_path,
     nfe=None,
@@ -344,6 +225,7 @@ def run_optimization_adaptive(
     abatement_type=Abatement.ENERDATA,
     optimizer=Optimizer.EpsNSGAII,
     evaluator=Evaluator.SequentialEvaluator,
+    reference_ssp_rcp_scenario_index=2,
 ):
     """Set up the EMA Model, register evaluation context, and run optimize()."""
     with open(config_path, "r") as file:
@@ -358,7 +240,7 @@ def run_optimization_adaptive(
     n_inputs = config["n_inputs"]
     epsilons = config["epsilons"]
     temperature_year_of_interest = config["temperature_year_of_interest"]
-    reference_index = config["reference_ssp_rcp_scenario_index"]
+    reference_index = reference_ssp_rcp_scenario_index
     stochastic_run = config["stochastic_run"]
     climate_members = config.get("climate_ensemble_members")
 
@@ -423,9 +305,13 @@ def run_optimization_adaptive(
     reference_scenario = Scenario("reference", ssp_rcp_scenario=reference_index)
 
     filename = f"{social_welfare_function.value[1]}_{nfe}_{seed}.tar.gz"
-    timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    timestamp = datetime.datetime.now().strftime("%Y_%m")  # _%d_%H_%M_%S
+    random_number = random.randint(0, 10000)
     directory_name = os.path.abspath(
-        os.path.join(datapath, f"{social_welfare_function.value[1]}_{timestamp}_{seed}")
+        os.path.join(
+            datapath,
+            f"{social_welfare_function.value[1]}_{timestamp}_{random_number}_ref{reference_ssp_rcp_scenario_index}_{seed}",
+        )
     )
 
     os.environ["BORG_RUNTIME_DIR"] = directory_name
@@ -522,5 +408,6 @@ if __name__ == "__main__":
         datapath="./data",
         optimizer=Optimizer.MSBorgMOEA,  # Optimizer.MMBorgMOEA, Optimizer.EpsNSGAII
         population_size=2,  # default is 100. Test locally with 2
+        reference_ssp_rcp_scenario_index=2,
         evaluator=Evaluator.SequentialEvaluator,
     )
