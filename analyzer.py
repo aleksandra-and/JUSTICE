@@ -447,8 +447,10 @@ def run_optimization_adaptive(
 
     if optimizer == Optimizer.EpsNSGAII:
         algorithm_class = EpsNSGAII
-    elif optimizer == Optimizer.BorgMOEA:
+    elif optimizer == Optimizer.MMBorgMOEA:
         algorithm_class = MMBorgMOEA
+    elif optimizer == Optimizer.MSBorgMOEA:
+        algorithm_class = MSBorgMOEA
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer}")
 
@@ -493,7 +495,11 @@ def run_optimization_adaptive(
                 algorithm=algorithm_class,
             )
 
-    if rank == 0 and optimizer == Optimizer.BorgMOEA and os.path.isdir(directory_name):
+    if (
+        rank == 0
+        and optimizer == Optimizer.MMBorgMOEA
+        and os.path.isdir(directory_name)
+    ):
         header = [lever.name for lever in model.levers] + [
             outcome.name for outcome in model.outcomes
         ]
@@ -506,18 +512,15 @@ def run_optimization_adaptive(
 if __name__ == "__main__":
     config_path = "analysis/normative_uncertainty_optimization.json"
 
-    if _mpi_rank() != 0:
-        ema_logging.logToStdErr = ema_logging.CRITICAL  # silence non-master ranks
-    else:
-        ema_logging.log_to_stderr(ema_logging.INFO)
+    ema_logging.log_to_stderr(ema_logging.INFO)
 
     run_optimization_adaptive(
         config_path=config_path,
         nfe=10,
         swf=0,
-        seed=None,
+        seed=10,  # None for Borg. Any integer for reproducibility with other optimizers
         datapath="./data",
-        optimizer=Optimizer.BorgMOEA,
-        population_size=100,
+        optimizer=Optimizer.MSBorgMOEA,  # Optimizer.MMBorgMOEA, Optimizer.EpsNSGAII
+        population_size=2,  # default is 100. Test locally with 2
         evaluator=Evaluator.SequentialEvaluator,
     )

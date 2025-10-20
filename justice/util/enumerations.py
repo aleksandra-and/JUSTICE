@@ -149,8 +149,9 @@ class Optimizer(Enum):
     """
 
     EpsNSGAII = 0
-    BorgMOEA = 1
+    MMBorgMOEA = 1
     MOMARL = 2
+    MSBorgMOEA = 3
 
     @staticmethod
     def from_index(index):

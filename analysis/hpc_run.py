@@ -20,6 +20,7 @@ if __name__ == "__main__":
         swf=swf,
         seed=seed,
         datapath="./data",
-        optimizer=Optimizer.BorgMOEA,  # Optimizer.BorgMOEA, Optimizer.EpsNSGAII
+        optimizer=Optimizer.MMBorgMOEA,  # Optimizer.BorgMOEA, Optimizer.EpsNSGAII
+        population_size=100,
         evaluator=Evaluator.SequentialEvaluator,
     )
