@@ -7,6 +7,7 @@ from justice.util.model_time import TimeHorizon
 from justice.util.data_loader import DataLoader
 from justice.util.enumerations import WelfareFunction, SSP
 import json
+import os
 
 
 def reevaluate_policies_for_all_scenarios(
@@ -59,7 +60,7 @@ def reevaluate_policies_for_all_scenarios(
                 print(
                     f"Reevaluating for: {ethical_framing}, ref scenario: {scenario}, Regret {regret_type} Policy Index: {policy_index}"
                 )
-
+                # TODO: Temporarily commenting out reevaluation to just extract variables
                 reevaluate_optimal_policy(
                     input_data=[
                         f"{social_welfare_function.value[1]}_reference_set.csv",
@@ -80,9 +81,39 @@ def reevaluate_policies_for_all_scenarios(
                     regret_type=regret_type,
                 )
 
+                # ############################################################################################################
+                variable_names_and_shapes = {
+                    "global_temperature": 2,
+                    "constrained_emission_control_rate": 3,
+                    "emissions": 3,
+                }
+                input_data_name = f"{ethical_framing}_reference_set_ref_{scenario}_{regret_type}_idx{policy_index}.h5"
+                for variable_name, data_shape in variable_names_and_shapes.items():
+                    reevaluated_optimal_policy_variable_extractor(
+                        scenario_list=scenario_list,  # [scenario], # This is only for a single scenario
+                        region_list=region_list,
+                        list_of_years=list_of_years,
+                        path_to_data=base_path,
+                        path_to_output=base_path + f"/{ethical_framing}_{scenario}"
+                        f"/ref_{scenario}_{regret_type}_idx{policy_index}",  # TODO Change this later
+                        variable_name=variable_name,
+                        data_shape=data_shape,  # 2 for temperature, 3 for rest
+                        no_of_ensembles=1001,
+                        input_data=[
+                            input_data_name,
+                        ],
+                        output_file_names=[
+                            f"{ethical_framing}_ref_{scenario}_{regret_type}_idx{policy_index}_{variable_name}",
+                        ],
+                    )
+
+                # Delete the hdf5 file
+                os.remove(base_path + "/" + input_data_name)
+                print(f"Deleted HDF5 file at location {input_data_name}")
+
 
 if __name__ == "__main__":
 
     reevaluate_policies_for_all_scenarios(
-        output_path="/Volumes/justicedrive/NU_data_20_Oct/reevaluation/"
+        output_path="data/temporary/NU_DATA/mmBorg/"  # "/Volumes/justicedrive/NU_data_20_Oct/reevaluation/"
     )

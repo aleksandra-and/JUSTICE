@@ -35,7 +35,6 @@ def reevaluated_optimal_policy_variable_extractor(
     no_of_ensembles=None,
     input_data=None,
     output_file_names=["Utilitarian", "Egalitarian", "Prioritarian", "Sufficientarian"],
-    cleanup_hdf5_files=False,
 ):
     # convert to Path
     path_to_data = Path(path_to_data)
@@ -115,17 +114,15 @@ def reevaluated_optimal_policy_variable_extractor(
                     + variable_name
                 )
 
+            # Check if output directory exists, if not create it
+            if not path_to_output.exists():
+                path_to_output.mkdir(parents=True, exist_ok=True)
             # Save it as npy file
             out_path = path_to_output / f"{output_file_name}.npy"
             np.save(out_path, processed_data)
 
             # Print file saved as filename at location path
             print(f"File saved as {output_file_name} at location {path_to_output}")
-
-            if cleanup_hdf5_files:
-                # Delete the hdf5 file
-                os.remove(h5_path)
-                print(f"Deleted HDF5 file at location {h5_path}")
 
 
 def reevaluate_optimal_policy(
