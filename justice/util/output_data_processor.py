@@ -35,6 +35,7 @@ def reevaluated_optimal_policy_variable_extractor(
     no_of_ensembles=None,
     input_data=None,
     output_file_names=["Utilitarian", "Egalitarian", "Prioritarian", "Sufficientarian"],
+    cleanup_hdf5_files=False,
 ):
     # convert to Path
     path_to_data = Path(path_to_data)
@@ -121,6 +122,11 @@ def reevaluated_optimal_policy_variable_extractor(
             # Print file saved as filename at location path
             print(f"File saved as {output_file_name} at location {path_to_output}")
 
+            if cleanup_hdf5_files:
+                # Delete the hdf5 file
+                os.remove(h5_path)
+                print(f"Deleted HDF5 file at location {h5_path}")
+
 
 def reevaluate_optimal_policy(
     input_data=[],
@@ -141,6 +147,8 @@ def reevaluate_optimal_policy(
     max_difference=2.0,
     min_difference=0.0,
     model_hard_reset=False,
+    reference_scenario=None,
+    regret_type=None,
 ):
     """
     Function to generate data for the optimal policy. It runs JUSTICE on the optimal policy and saves the data as a pickle file.
@@ -223,7 +231,20 @@ def reevaluate_optimal_policy(
                     min_difference=min_difference,
                 )
 
-                output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
+                if reference_scenario is not None and regret_type is not None:
+                    print("Saving file as ", output_file_name)
+                    output_file_name = (
+                        output_file_name
+                        + "_ref_"
+                        + reference_scenario
+                        + "_"
+                        + regret_type
+                        + "_idx"
+                        + str(rbf_policy_index)
+                    )
+                else:
+                    print("Saving file as ", output_file_name)
+                    output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
 
                 # Now save in hdf5 format
                 with h5py.File(path_to_output + output_file_name + ".h5", "w") as f:
@@ -261,7 +282,21 @@ def reevaluate_optimal_policy(
                 max_difference=max_difference,
                 min_difference=min_difference,
             )
-            output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
+
+            if reference_scenario is not None and regret_type is not None:
+                print("Saving file as ", output_file_name)
+                output_file_name = (
+                    output_file_name
+                    + "_ref_"
+                    + reference_scenario
+                    + "_"
+                    + regret_type
+                    + "_idx"
+                    + str(rbf_policy_index)
+                )
+            else:
+                print("Saving file as ", output_file_name)
+                output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
 
             # Save as HDF5 file
             with h5py.File(path_to_output + output_file_name + ".h5", "w") as f:
@@ -299,7 +334,20 @@ def reevaluate_optimal_policy(
                 max_difference=max_difference,
                 min_difference=min_difference,
             )
-            output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
+            if reference_scenario is not None and regret_type is not None:
+                print("Saving file as ", output_file_name)
+                output_file_name = (
+                    output_file_name
+                    + "_ref_"
+                    + reference_scenario
+                    + "_"
+                    + regret_type
+                    + "_idx"
+                    + str(rbf_policy_index)
+                )
+            else:
+                print("Saving file as ", output_file_name)
+                output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
 
             # Save as HDF5 file
             with h5py.File(path_to_output + output_file_name + ".h5", "w") as f:

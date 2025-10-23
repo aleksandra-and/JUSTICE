@@ -1,0 +1,88 @@
+import pandas as pd
+from justice.util.output_data_processor import (
+    reevaluate_optimal_policy,
+    reevaluated_optimal_policy_variable_extractor,
+)
+from justice.util.model_time import TimeHorizon
+from justice.util.data_loader import DataLoader
+from justice.util.enumerations import WelfareFunction, SSP
+import json
+
+
+def reevaluate_policies_for_all_scenarios(
+    base_path="data/temporary/NU_DATA/mmBorg/",
+    scenario_list=["SSP126", "SSP245", "SSP370", "SSP460", "SSP534"],
+    policy_indices_dict_name="min_regret_policy_indices.json",
+    output_path=None,
+    start_year=2015,
+    end_year=2300,
+    data_timestep=5,
+    timestep=1,
+):
+
+    # Throw error if output_path is None
+    if output_path is None:
+        raise ValueError(
+            "output_path cannot be None. Please provide a valid output path."
+        )
+
+    start_year = 2015
+    end_year = 2300
+    data_timestep = 5
+    timestep = 1
+
+    data_loader = DataLoader()
+    region_list = data_loader.REGION_LIST
+
+    time_horizon = TimeHorizon(
+        start_year=start_year,
+        end_year=end_year,
+        data_timestep=data_timestep,
+        timestep=timestep,
+    )
+
+    list_of_years = time_horizon.model_time_horizon
+
+    with open(base_path + policy_indices_dict_name, "r") as f:
+        loaded_min_regret_policy_indices = json.load(f)
+
+    for scenario, ethical_data in loaded_min_regret_policy_indices.items():
+
+        for ethical_framing, regret_data in ethical_data.items():
+
+            for regret_type, policy_index in regret_data.items():
+
+                # ssp = SSP[scenario]
+                social_welfare_function = WelfareFunction[ethical_framing]
+                path = f"{base_path}/{ethical_framing}_{scenario}/"
+                # Print
+                print(
+                    f"Reevaluating for: {ethical_framing}, ref scenario: {scenario}, Regret {regret_type} Policy Index: {policy_index}"
+                )
+
+                reevaluate_optimal_policy(
+                    input_data=[
+                        f"{social_welfare_function.value[1]}_reference_set.csv",
+                    ],
+                    path_to_rbf_weights=path,  #  reevaluation
+                    path_to_output=output_path,  #  reevaluation
+                    direction_of_optimization=[
+                        "min",
+                        "min",
+                    ],
+                    rbf_policy_index=policy_index,  # selected_indices[0], # This chooses policy for a particular rival framing. Can also set to the index directly
+                    list_of_objectives=[
+                        "welfare",
+                        "fraction_above_threshold",
+                    ],
+                    scenario_list=scenario_list,  # [scenario], # This is only for a single scenario
+                    reference_scenario=scenario,
+                    regret_type=regret_type,
+                )
+
+
+if __name__ == "__main__":
+
+    reevaluate_policies_for_all_scenarios(
+        output_path="/Volumes/justicedrive/NU_data_20_Oct/reevaluation/"
+    )
