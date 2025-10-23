@@ -794,6 +794,9 @@ def plot_comparison_with_boxplots(
 
     if saving:
         filename = data_paths[0].split("/")[-1].split(".")[0] + "_" + output_name_suffix
+        # Check if output path exists
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
         # Save the plot
         fig.write_image(f"{output_path}/{filename}.svg")
 
@@ -2354,6 +2357,7 @@ def plot_choropleth_2D_data(
     normalized_colorbar=False,
     tickvals=[0, 0.25, 0.5, 0.75, 1],
     ticktext=["0%", "25%", "50%", "75%", "100%"],
+    plot_saving_format="svg",
 ):
 
     # Assert if input_data list and output_titles list is None
@@ -2488,13 +2492,26 @@ def plot_choropleth_2D_data(
 
         output_file_name = filename
         if saving:
-            fig.write_image(
-                path_to_output
-                + "/"
-                + output_file_name
-                + str(year_to_visualize)
-                + ".svg"
-            )
+            # Check if path to output exists
+            # if not os.path.exists(path_to_output):
+            #     os.makedirs(path_to_output)
+
+            if plot_saving_format == "png":
+                fig.write_image(
+                    path_to_output
+                    + "/"
+                    + output_file_name
+                    + str(year_to_visualize)
+                    + ".png"
+                )
+            else:
+                fig.write_image(
+                    path_to_output
+                    + "/"
+                    + output_file_name
+                    + str(year_to_visualize)
+                    + ".svg"
+                )
 
     return fig, processed_data_dict
 
