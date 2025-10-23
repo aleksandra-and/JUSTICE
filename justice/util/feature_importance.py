@@ -202,17 +202,14 @@ def build_long_dataframe(
 
 
 # -------------------------------
-# Build cell-level datasets (mean/median/P90 targets)
+# Build cell-level datasets (raw/mean/median/P90 targets)
 # -------------------------------
 def build_cell_level_targets(
     long_df, years=(2030, 2050, 2070, 2100), target_stat="mean", scope="Global"
 ):
     """
-    Aggregate across 1001 samples to get one scalar target per cell.
-    - scope: "Global" (Region == "Global") or "Regional" (per region)
-    - target_stat: "mean", "median" (or "p50"), or "p90"
-    Returns a tidy DataFrame with one row per cell and columns:
-      ['Year', 'Optimization', 'Regret', 'Scenario', 'Welfare'] (+ 'Region' if Regional) and 'Y'
+    Aggregate across 1001 samples to get one scalar target per cell, unless target_stat='raw'
+    in which case each sample is kept.
     """
     assert scope in ("Global", "Regional")
     stat = target_stat.lower()
@@ -220,6 +217,40 @@ def build_cell_level_targets(
         stat = "median"
 
     df = long_df[long_df["Year"].isin(years)].copy()
+
+    if stat == "raw":
+        if scope == "Global":
+            df = df[df["Region"] == "Global"]
+            keep_cols = [
+                "Year",
+                "Optimization",
+                "Regret",
+                "Scenario",
+                "Welfare",
+                "Sample",
+                "AbatedEmission",
+            ]
+        else:
+            df = df[df["Scope"] == "Regional"]
+            keep_cols = [
+                "Year",
+                "Region",
+                "Optimization",
+                "Regret",
+                "Scenario",
+                "Welfare",
+                "Sample",
+                "AbatedEmission",
+            ]
+        df = df[keep_cols].rename(columns={"AbatedEmission": "Y"})
+        for c in ["Optimization", "Regret", "Scenario", "Welfare"]:
+            df[c] = df[c].astype("category")
+        if scope == "Regional":
+            df["Region"] = df["Region"].astype("category")
+        df["Sample"] = df["Sample"].astype("category")
+        df["Year"] = df["Year"].astype(np.int32)
+        return df
+
     if scope == "Global":
         df = df[df["Region"] == "Global"]
         group_cols = ["Year", "Optimization", "Regret", "Scenario", "Welfare"]
@@ -245,7 +276,7 @@ def build_cell_level_targets(
         )
     else:
         raise ValueError(
-            "target_stat must be one of: 'mean', 'median' (or 'p50'), 'p90'"
+            "target_stat must be one of: 'raw', 'mean', 'median' (or 'p50'), 'p90'"
         )
 
     agg_df = agg_df.rename(columns={"AbatedEmission": "Y"})
@@ -263,7 +294,7 @@ def build_cell_level_targets(
 # -------------------------------
 def _loss_for_stat(target_stat):
     stat = target_stat.lower()
-    if stat in ("mean",):
+    if stat in ("mean", "raw"):
         return "RMSE"
     if stat in ("median", "p50"):
         return "Quantile:alpha=0.5"
@@ -275,7 +306,7 @@ def _loss_for_stat(target_stat):
 def _metrics_for_stat(y_true, y_pred, target_stat):
     """
     Compute evaluation metrics per fold.
-    - For mean (RMSE): return {'RMSE': ..., 'R2': ...}
+    - For mean/raw (RMSE): return {'RMSE': ..., 'R2': ...}
     - For median/P90 (Quantile): return {'Pinball': ...} where alpha is 0.5 or 0.9
     """
     y_true = np.asarray(y_true, dtype=float)
@@ -287,7 +318,7 @@ def _metrics_for_stat(y_true, y_pred, target_stat):
         ss_tot = np.sum((y - np.mean(y)) ** 2)
         return 0.0 if ss_tot <= 1e-12 else 1.0 - ss_res / ss_tot
 
-    if stat == "mean":
+    if stat in ("mean", "raw"):
         rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
         r2 = float(r2_score(y_true, y_pred))
         return {"RMSE": rmse, "R2": r2}
@@ -333,9 +364,9 @@ def fit_catboost_cv_shap(
           'cv_metrics': list of dicts per fold,
           'cv_metrics_mean': dict of mean metrics,
           'best_iterations': list,
-          'shap_cv_mean': Series (mean absolute SHAP over validation data, averaged across folds),
-          'model_full': fitted CatBoost on full data (iterations ~= mean best_iter),
-          'shap_full': Series (mean absolute SHAP on full data)
+          'shap_cv_mean': Series,
+          'model_full': fitted CatBoost on full data,
+          'shap_full': Series
         }
     """
     if params is None:
@@ -404,7 +435,7 @@ def fit_catboost_cv_shap(
     )
     final_params = dict(params)
     final_params["n_estimators"] = avg_best
-    # Important fix: disable use_best_model and overfitting detector for final fit (no eval_set provided)
+    # disable use_best_model and overfitting detector for the final fit
     final_params["use_best_model"] = False
     final_params.pop("od_type", None)
     final_params.pop("od_wait", None)
@@ -445,16 +476,11 @@ def plot_bar_importance(
     """
     If outfile ends with .csv/.json/.parquet, save the importance data to that file (no plot).
     Otherwise, create a bar plot and save/show as before.
-
-    Saved table schema (CSV/JSON/Parquet):
-      - Feature: feature name
-      - Importance: value (normalized if normalized=True)
     """
     s = series.copy()
     if normalized:
         s = _normalize(s)
 
-    # If outfile requests a data format, save and skip plotting
     ext = str(outfile).lower() if outfile is not None else ""
     is_csv = ext.endswith(".csv")
     is_json = ext.endswith(".json")
@@ -463,7 +489,6 @@ def plot_bar_importance(
     if outfile is not None and (is_csv or is_json or is_parquet):
         df = s.rename_axis("Feature").reset_index(name="Importance")
         Path(outfile).parent.mkdir(parents=True, exist_ok=True)
-        # Print the directory where file will be saved
         print(f"Saving feature importance data to: {Path(outfile).resolve()}")
         if is_csv:
             df.to_csv(outfile, index=False)
@@ -471,9 +496,8 @@ def plot_bar_importance(
             df.to_json(outfile, orient="records")
         elif is_parquet:
             df.to_parquet(outfile, index=False)
-        return df  # return saved data
+        return df
 
-    # Otherwise: do the plot
     plt.figure(figsize=figsize)
     plt.bar(s.index, s.values, color=color)
     plt.ylabel(
@@ -496,7 +520,7 @@ def plot_bar_importance(
 # Pipeline per scope/year/stat (SHAP only)
 # -------------------------------
 def run_ml_importance_for_scope(
-    cell_df,  # output of build_cell_level_targets for a given scope
+    cell_df,
     scope="Global",
     years=(2030, 2050, 2070, 2100),
     target_stat="mean",
@@ -508,27 +532,21 @@ def run_ml_importance_for_scope(
     model_type="final",  # "final" or "cv-mean"
 ):
     """
-    For the given scope (Global or Regional cell-level data), fit CatBoost models per year with CV and early stopping:
-      - Cross-validated metrics (RMSE/R2 for mean; Pinball loss for quantiles)
-      - SHAP importances averaged across CV folds on validation data (to avoid overfitting)
-      - Final model on full data and its SHAP importances (reference)
-    Saves bar plots of SHAP importances and returns a nested results dict.
+    For the given scope (Global or Regional cell-level data), fit CatBoost models per year with CV.
     """
     results = {}
     target_name = f"Y_{target_stat.lower()}"
-    # Rename target column
     df = cell_df.copy()
     df = df.rename(columns={"Y": target_name})
 
-    # Feature columns
     feature_cols = ["Optimization", "Regret", "Scenario", "Welfare"]
-    categorical_cols = feature_cols[:]  # all features are categorical
+    if target_stat.lower() == "raw":
+        feature_cols = feature_cols + ["Sample"]
+    categorical_cols = feature_cols[:]
 
-    # Directory structure
     outbase = Path(output_dir) / scope.lower() / target_stat.lower()
     outbase.mkdir(parents=True, exist_ok=True)
 
-    # Print the directory where plots will be saved
     print(f"Saving plots to: {outbase.resolve()}")
 
     for yr in years:
@@ -539,7 +557,6 @@ def run_ml_importance_for_scope(
         year_results = {}
 
         if scope == "Global":
-            # Single model per year
             X = d[feature_cols].copy()
             y = d[target_name].copy()
 
@@ -556,7 +573,6 @@ def run_ml_importance_for_scope(
             year_results.update(res)
 
             if model_type == "cv-mean":
-                # Plot SHAP CV-mean and SHAP full
                 plot_bar_importance(
                     res["shap_cv_mean"],
                     title=f"{scope} {yr} — SHAP importance (CV mean, {target_stat})",
@@ -574,13 +590,11 @@ def run_ml_importance_for_scope(
                 )
 
         else:
-            # Per-region models
             year_results["regions"] = {}
             for region, d_r in d.groupby("Region", observed=True):
                 X = d_r[feature_cols].copy()
                 y = d_r[target_name].copy()
                 if len(X) < 4:
-                    # Not enough rows to run CV; skip or fit without CV
                     continue
 
                 res = fit_catboost_cv_shap(
@@ -594,7 +608,6 @@ def run_ml_importance_for_scope(
                 )
                 year_results["regions"][str(region)] = res
 
-                # Plots
                 safe_region = str(region).replace(" ", "_").replace("/", "_")
                 if model_type == "cv-mean":
                     plot_bar_importance(
@@ -635,8 +648,6 @@ def run_all_ml_importance(
     """
     Build cell-level targets for each requested statistic and run CatBoost + SHAP
     for Global and Regional scopes.
-    Returns nested dict:
-      results[stat][scope][year] -> dict with cv metrics, shap_cv_mean, model_full, shap_full
     """
     all_results = {}
     for stat in target_stats:
@@ -676,75 +687,3 @@ def run_all_ml_importance(
 
         all_results[stat] = {"Global": global_results, "Regional": regional_results}
     return all_results
-
-
-# -------------------------------
-# Example main execution
-# -------------------------------
-if __name__ == "__main__":
-    # # 1) Build the long dataset for selected years (keeps all 1001 samples)
-    long_df = build_long_dataframe(
-        base_path="data/temporary/NU_DATA/mmBorg/",
-        region_mapping_path="data/input/12_regions.json",
-        rice_region_dict_path="data/input/rice50_regions_dict.json",
-        years_of_interest=(2030, 2050, 2070, 2100),
-    )
-
-    print("Long DF shape:", long_df.shape)
-
-    # Save as csv in the base directory
-    long_df.to_csv(
-        "data/temporary/NU_DATA/mmBorg//long_abated_emissions_data.csv", index=False
-    )
-    # # global_cells = build_cell_level_targets(long_df, years=(2030, 2050, 2070, 2100), target_stat="mean", scope="Global")
-    # # print("Global cells shape:", global_cells.shape)
-    # # regional_cells = build_cell_level_targets(long_df, years=(2030, 2050, 2070, 2100), target_stat="mean", scope="Regional")
-
-    # # # 2) Run CatBoost + SHAP for mean/median/P90, both global and per-region
-    # # #    Plots are saved in ml_importance_plots/<scope>/<stat>/...
-    # results = run_all_ml_importance(
-    #     long_df,
-    #     years=(2030, 2050, 2070, 2100),
-    #     target_stats=("mean", "median", "p90"),
-    #     output_dir="ml_importance_plots",
-    #     cv_folds=5,
-    #     random_state=42,
-    #     model_params=dict(
-    #         depth=6,
-    #         learning_rate=0.05,
-    #         n_estimators=800,  # upper bound; early stopping finds best < this in CV
-    #         l2_leaf_reg=3.0,
-    #         loss_function="RMSE",  # overridden per statistic internally
-    #         random_seed=42,
-    #         od_type="Iter",
-    #         od_wait=50,
-    #         use_best_model=True,
-    #         verbose=False,
-    #         allow_writing_files=False,
-    #     ),
-    #     normalized_plots=True,  # set False to see raw mean |SHAP|
-    #     model_type="final",  # "final" or "cv-mean"
-    # )
-
-    # # 3) Example: inspect some results in memory
-    # # Global, year 2100, mean target
-    # mean_global_2100 = results["mean"]["Global"][2100]
-    # print("\nGlobal 2100 — CV metrics (mean):", mean_global_2100["cv_metrics_mean"])
-    # print("Global 2100 — SHAP (CV mean):\n", mean_global_2100["shap_cv_mean"])
-    # print("Global 2100 — SHAP (final model):\n", mean_global_2100["shap_full"])
-
-    # # Regional, year 2100, P90 target, example region
-    # p90_regional_2100 = results["p90"]["Regional"][2100]["regions"]
-    # example_region = next(iter(p90_regional_2100.keys()))
-    # print(
-    #     f"\nRegional 2100 ({example_region}) — CV metrics (mean):",
-    #     p90_regional_2100[example_region]["cv_metrics_mean"],
-    # )
-    # print(
-    #     f"Regional 2100 ({example_region}) — SHAP (CV mean):\n",
-    #     p90_regional_2100[example_region]["shap_cv_mean"],
-    # )
-    # print(
-    #     f"Regional 2100 ({example_region}) — SHAP (final model):\n",
-    #     p90_regional_2100[example_region]["shap_full"],
-    # )
