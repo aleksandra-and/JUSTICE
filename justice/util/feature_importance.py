@@ -632,7 +632,7 @@ def run_ml_importance_for_scope(
 
 
 # -------------------------------
-# Convenience runner for all stats and both scopes (SHAP only)
+# Convenience runner for all stats and either scope (SHAP only)
 # -------------------------------
 def run_all_ml_importance(
     long_df,
@@ -644,46 +644,49 @@ def run_all_ml_importance(
     model_params=None,
     normalized_plots=True,
     model_type="final",  # "final" or "cv-mean"
+    scope="global",  # or "regional"
 ):
     """
     Build cell-level targets for each requested statistic and run CatBoost + SHAP
-    for Global and Regional scopes.
+    for either Global or Regional scope.
     """
     all_results = {}
+    scope = scope.lower()
     for stat in target_stats:
-        # Global
-        global_cells = build_cell_level_targets(
-            long_df, years=years, target_stat=stat, scope="Global"
-        )
-        global_results = run_ml_importance_for_scope(
-            global_cells,
-            scope="Global",
-            years=years,
-            target_stat=stat,
-            output_dir=output_dir,
-            cv_folds=cv_folds,
-            random_state=random_state,
-            model_params=model_params,
-            normalized_plots=normalized_plots,
-            model_type=model_type,
-        )
-
-        # Regional
-        regional_cells = build_cell_level_targets(
-            long_df, years=years, target_stat=stat, scope="Regional"
-        )
-        regional_results = run_ml_importance_for_scope(
-            regional_cells,
-            scope="Regional",
-            years=years,
-            target_stat=stat,
-            output_dir=output_dir,
-            cv_folds=cv_folds,
-            random_state=random_state,
-            model_params=model_params,
-            normalized_plots=normalized_plots,
-            model_type=model_type,
-        )
-
-        all_results[stat] = {"Global": global_results, "Regional": regional_results}
+        if scope == "regional":
+            regional_cells = build_cell_level_targets(
+                long_df, years=years, target_stat=stat, scope="Regional"
+            )
+            regional_results = run_ml_importance_for_scope(
+                regional_cells,
+                scope="Regional",
+                years=years,
+                target_stat=stat,
+                output_dir=output_dir,
+                cv_folds=cv_folds,
+                random_state=random_state,
+                model_params=model_params,
+                normalized_plots=normalized_plots,
+                model_type=model_type,
+            )
+            all_results[stat] = {"Regional": regional_results}
+        elif scope == "global":
+            global_cells = build_cell_level_targets(
+                long_df, years=years, target_stat=stat, scope="Global"
+            )
+            global_results = run_ml_importance_for_scope(
+                global_cells,
+                scope="Global",
+                years=years,
+                target_stat=stat,
+                output_dir=output_dir,
+                cv_folds=cv_folds,
+                random_state=random_state,
+                model_params=model_params,
+                normalized_plots=normalized_plots,
+                model_type=model_type,
+            )
+            all_results[stat] = {"Global": global_results}
+        else:
+            raise ValueError("scope must be either 'global' or 'regional'")
     return all_results
