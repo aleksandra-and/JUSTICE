@@ -20,11 +20,724 @@ import pickle
 from justice.util.data_loader import DataLoader
 from plotly.subplots import make_subplots
 from sklearn.preprocessing import MinMaxScaler
-
 import json
 import pycountry
 import plotly.express as px
 import plotly.graph_objects as go
+import re
+from typing import Dict, List
+from typing import Iterable
+from matplotlib.collections import PatchCollection
+from matplotlib.patches import Polygon
+import matplotlib.colors as mcolors
+
+# =============================================================================
+
+
+def load_regional_uncertainty_shares(
+    base_dir: str,
+    stat: str = "raw",
+    model_type: str = "final",
+    years: Iterable[int] = (2030, 2050, 2070, 2100),
+    FEATURE_ORDER=["Scenario", "Regret", "Welfare", "Optimization", "Sample"],
+) -> pd.DataFrame:
+    base = Path(base_dir) / "regional" / stat.lower()
+    if not base.exists():
+        raise FileNotFoundError(f"Directory not found: {base}")
+
+    kind = "shap_full" if model_type == "final" else "shap_cv"
+    pattern = re.compile(rf"^(?P<region>.+)_(?P<year>\d{{4}})_{kind}\.csv$")
+
+    records = []
+    for csv_path in base.glob("*.csv"):
+        m = pattern.match(csv_path.name)
+        if not m:
+            continue
+
+        region_slug = m.group("region")
+        year = int(m.group("year"))
+        if year not in years:
+            continue
+
+        df = pd.read_csv(csv_path)
+        if not {"Feature", "Importance"}.issubset(df.columns):
+            print(f"[warn] '{csv_path}' missing required columns. Skipping.")
+            continue
+
+        s = df.set_index("Feature")["Importance"]
+        s = s.reindex(FEATURE_ORDER, fill_value=0.0)
+        total = s.sum()
+        if total <= 0:
+            continue
+
+        shares = s / total
+        records.append(
+            {
+                "Region": region_slug,
+                "Year": year,
+                "Normative": float(shares[["Regret", "Welfare", "Optimization"]].sum()),
+                "Deep": float(shares["Scenario"]),
+                "Stochastic": float(shares["Sample"]),
+                "Scenario": float(shares["Scenario"]),
+                "Regret": float(shares["Regret"]),
+                "Welfare": float(shares["Welfare"]),
+                "Optimization": float(shares["Optimization"]),
+                "Sample": float(shares["Sample"]),
+            }
+        )
+
+    shares_df = pd.DataFrame(records)
+    if shares_df.empty:
+        raise ValueError("No valid regional CSVs found. Check paths/stat/model_type.")
+    return shares_df
+
+
+# =============================================================================
+# 2. Ternary background + color mixing
+# =============================================================================
+def mix_color(
+    normative,
+    deep,
+    stochastic,
+    base_colors=np.array(
+        [
+            [1.0, 0.0, 1.0],  # Normative → magenta
+            [1.0, 1.0, 0.0],  # Deep      → yellow
+            [0.0, 1.0, 1.0],  # Stochastic→ cyan
+        ]
+    ),
+    as_hex=True,
+):
+    weights = np.array([normative, deep, stochastic], dtype=float)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError("Normative + Deep + Stochastic must be positive.")
+    weights /= total
+    rgb = np.clip(weights @ base_colors, 0, 1)
+    return mcolors.to_hex(rgb) if as_hex else rgb
+
+
+def quantize_simplex(n, d, s, scale=8):
+    """Snap (n, d, s) onto a discrete ternary lattice with step size 1/scale."""
+    weights = np.array([n, d, s], dtype=float)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError("Normative + Deep + Stochastic must be positive.")
+    weights /= total
+
+    scaled = weights * scale
+    base = np.floor(scaled)
+    remainder = scale - int(base.sum())
+
+    if remainder > 0:
+        frac = scaled - base
+        for idx in np.argsort(-frac):
+            if remainder == 0:
+                break
+            base[idx] += 1
+            remainder -= 1
+    elif remainder < 0:
+        frac = scaled - base
+        for idx in np.argsort(frac):
+            if remainder == 0:
+                break
+            base[idx] -= 1
+            remainder += 1
+
+    snapped = base / scale
+    snapped /= snapped.sum()
+    return snapped
+
+
+def barycentric_to_cartesian(normative, deep, stochastic):
+    x = stochastic + 0.5 * normative
+    y = (np.sqrt(3) / 2.0) * normative
+    return x, y
+
+
+def build_triangular_mesh(scale):
+    bary_coords = []
+    cart_coords = []
+    idx_lookup = {}
+    idx = 0
+    for i in range(scale + 1):
+        for j in range(scale + 1 - i):
+            k = scale - i - j
+            n = i / scale
+            d = j / scale
+            s = k / scale
+            bary_coords.append(np.array([n, d, s]))
+            cart_coords.append(barycentric_to_cartesian(n, d, s))
+            idx_lookup[(i, j)] = idx
+            idx += 1
+
+    triangles = []
+    for i in range(scale):
+        for j in range(scale - i):
+            p0 = idx_lookup[(i, j)]
+            p1 = idx_lookup[(i + 1, j)]
+            p2 = idx_lookup[(i, j + 1)]
+            triangles.append((p0, p1, p2))
+            if i + j < scale - 1:
+                p3 = idx_lookup[(i + 1, j + 1)]
+                triangles.append((p1, p3, p2))
+    return bary_coords, cart_coords, triangles
+
+
+def draw_ternary_background(
+    scale=8,
+    base_colors=np.array(
+        [
+            [1.0, 0.0, 1.0],  # Normative → magenta
+            [1.0, 1.0, 0.0],  # Deep      → yellow
+            [0.0, 1.0, 1.0],  # Stochastic→ cyan
+        ]
+    ),
+    ax=None,
+    annotate=False,
+):
+    bary_coords, cart_coords, triangles = build_triangular_mesh(scale)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6.5, 6))
+    else:
+        fig = ax.figure
+
+    patches = []
+    colors = []
+    for tri in triangles:
+        verts = [cart_coords[idx] for idx in tri]
+        centroid = np.mean([bary_coords[idx] for idx in tri], axis=0)
+        face_color = mix_color(*centroid, base_colors=base_colors, as_hex=False)
+        patches.append(Polygon(verts))
+        colors.append(face_color)
+
+        if annotate:
+            cx, cy = barycentric_to_cartesian(*centroid)
+            ax.text(
+                cx,
+                cy,
+                f"{centroid[0]:.2f}\n{centroid[1]:.2f}\n{centroid[2]:.2f}",
+                ha="center",
+                va="center",
+                fontsize=6,
+                color="black",
+            )
+
+    pcoll = PatchCollection(patches, facecolors=colors, edgecolors="k", linewidths=0.3)
+    ax.add_collection(pcoll)
+
+    boundary = np.array(
+        [
+            barycentric_to_cartesian(0, 0, 1),
+            barycentric_to_cartesian(0, 1, 0),
+            barycentric_to_cartesian(1, 0, 0),
+            barycentric_to_cartesian(0, 0, 1),
+        ]
+    )
+    ax.plot(boundary[:, 0], boundary[:, 1], color="black", linewidth=1.25)
+
+    for i in range(1, scale):
+        t = i / scale
+        p1 = barycentric_to_cartesian(t, 0, 1 - t)
+        p2 = barycentric_to_cartesian(t, 1 - t, 0)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="white", alpha=0.6, linewidth=0.8)
+        p1 = barycentric_to_cartesian(0, t, 1 - t)
+        p2 = barycentric_to_cartesian(1 - t, t, 0)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="white", alpha=0.6, linewidth=0.8)
+        p1 = barycentric_to_cartesian(0, 1 - t, t)
+        p2 = barycentric_to_cartesian(1 - t, 0, t)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="white", alpha=0.6, linewidth=0.8)
+
+    ax.text(
+        0.5, np.sqrt(3) / 2 + 0.04, "Normative", ha="center", va="bottom", fontsize=12
+    )
+    ax.text(-0.04, -0.03, "Deep", ha="right", va="top", fontsize=12)
+    ax.text(1.04, -0.03, "Stochastic", ha="left", va="top", fontsize=12)
+
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, np.sqrt(3) / 2 + 0.08)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return fig, ax
+
+
+def add_regions_to_ternary(
+    ax,
+    df_year: pd.DataFrame,
+    scale: int = 8,
+    quantize: bool = True,
+    annotate: bool = False,
+    marker_size: float = 18,
+    jitter_strength: float = 0.02,
+    random_state: int = 0,
+):
+    rng = np.random.default_rng(random_state) if jitter_strength > 0 else None
+
+    for _, row in df_year.iterrows():
+        n, d, s = row["Normative"], row["Deep"], row["Stochastic"]
+        if quantize:
+            n, d, s = quantize_simplex(n, d, s, scale=scale)
+
+        weights = np.array([n, d, s], dtype=float)
+        if jitter_strength > 0:
+            noise = rng.normal(scale=jitter_strength, size=3)
+            weights = np.clip(weights + noise, 1e-6, None)
+            weights /= weights.sum()
+
+        x, y = barycentric_to_cartesian(*weights)
+        ax.scatter(
+            x,
+            y,
+            s=marker_size,
+            marker=".",
+            color="black",
+            edgecolor="none",
+        )
+
+        if annotate:
+            label = row["Region"].replace("_", " ")
+            ax.text(
+                x, y, label, fontsize=4, ha="left", va="top"
+            )  # ha and va mean horizontalalignment and verticalalignment
+
+
+# =============================================================================
+# 3. Choropleth helpers
+# =============================================================================
+def hex_to_rgb(hex_color: str) -> str:
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgb({r},{g},{b})"
+
+
+def build_choropleth(
+    df_year: pd.DataFrame,
+    region_to_iso_path: str,
+    scale: int = 8,
+    quantize: bool = True,
+    projection_type: str = "equal earth",
+) -> go.Figure:
+    with open(region_to_iso_path, "r", encoding="utf-8") as f:
+        region_to_iso = json.load(f)
+
+    rows = []
+    missing_regions = []
+
+    for _, row in df_year.iterrows():
+        label = row["Region"].replace("_", " ")
+        if label not in region_to_iso:
+            missing_regions.append(label)
+            continue
+
+        n, d, s = row["Normative"], row["Deep"], row["Stochastic"]
+        if quantize:
+            n, d, s = quantize_simplex(n, d, s, scale=scale)
+        color_hex = mix_color(n, d, s, as_hex=True)
+
+        for iso3 in region_to_iso[label]:
+            if iso3 == "ATA":
+                continue  # skip Antarctica
+            rows.append(
+                {
+                    "iso_a3": iso3,
+                    "macro_region": label,
+                    "Normative": n,
+                    "Deep": d,
+                    "Stochastic": s,
+                    "color_hex": color_hex,
+                }
+            )
+
+    if missing_regions:
+        print("[warn] Regions missing in JSON:", ", ".join(missing_regions))
+
+    map_df = pd.DataFrame(rows)
+    if map_df.empty:
+        raise ValueError("No regions found for this year that match the JSON mapping.")
+
+    unique_regions = map_df["macro_region"].unique()
+    region_to_idx = {reg: idx for idx, reg in enumerate(unique_regions)}
+    map_df["region_idx"] = map_df["macro_region"].map(region_to_idx)
+
+    n_regions = len(unique_regions)
+    colorscale = []
+    for region in unique_regions:
+        idx = region_to_idx[region]
+        start = idx / n_regions
+        end = (idx + 1) / n_regions
+        color_rgb = hex_to_rgb(
+            map_df.loc[map_df["macro_region"] == region, "color_hex"].iloc[0]
+        )
+        colorscale.append([start, color_rgb])
+        colorscale.append([end, color_rgb])
+
+    choropleth = go.Choropleth(
+        locations=map_df["iso_a3"],
+        z=map_df["region_idx"],
+        text=map_df["macro_region"],
+        hovertemplate="<b>%{text}</b><extra></extra>",
+        colorscale=colorscale,
+        showscale=False,
+        marker=dict(line=dict(color="rgba(255,255,255,0.7)", width=0.4)),
+    )
+
+    fig = go.Figure(data=choropleth)
+    fig.update_layout(
+        showlegend=False,
+        paper_bgcolor="#f8f8f8",
+        plot_bgcolor="#f8f8f8",
+        margin=dict(l=0, r=0, t=0, b=0),
+        geo=dict(
+            projection=dict(type=projection_type),
+            showframe=False,
+            showcoastlines=False,
+            bgcolor="#f8f8f8",
+            landcolor="#f8f8f8",
+        ),
+    )
+    return fig
+
+
+# =============================================================================
+# 4. Master routine
+# =============================================================================
+def generate_uncertainty_visualizations(
+    base_dir: str,
+    region_mapping_path: str,
+    stat: str = "raw",
+    model_type: str = "final",
+    years: Iterable[int] = (2030, 2050, 2070, 2100),
+    ternary_scale: int = 8,
+    quantize: bool = True,
+    annotate_points: bool = False,
+    marker_size: float = 18,
+    jitter_strength: float = 0.02,
+    random_state: int = 0,
+    output_dir: str = "fig_ternary_choropleth",
+):
+    shares_df = load_regional_uncertainty_shares(
+        base_dir=base_dir,
+        stat=stat,
+        model_type=model_type,
+        years=years,
+    )
+
+    output_base = Path(output_dir)
+    output_base.mkdir(parents=True, exist_ok=True)
+
+    sns.set_theme(style="white")
+
+    results = {}
+    last_map = None
+    for yr in years:
+        df_year = shares_df[shares_df["Year"] == yr]
+        if df_year.empty:
+            print(f"[warn] No data for year {yr}. Skipping.")
+            continue
+
+        fig_tern, ax_tern = draw_ternary_background(scale=ternary_scale)
+        add_regions_to_ternary(
+            ax_tern,
+            df_year,
+            scale=ternary_scale,
+            quantize=quantize,
+            annotate=annotate_points,
+            marker_size=marker_size,
+            jitter_strength=jitter_strength,
+            random_state=random_state,
+        )
+        ax_tern.set_title(f"Regional Uncertainty Composition — {yr}")
+        ternary_path = output_base / f"ternary_{yr}.png"
+        fig_tern.savefig(ternary_path, dpi=300, bbox_inches="tight")
+        plt.close(fig_tern)
+
+        fig_map = build_choropleth(
+            df_year,
+            region_to_iso_path=region_mapping_path,
+            scale=ternary_scale,
+            quantize=quantize,
+        )
+        svg_map_path = output_base / f"choropleth_{yr}.svg"
+        fig_map.write_image(str(svg_map_path), format="svg", width=800, height=600)
+
+        results[yr] = {"ternary": ternary_path, "choropleth": svg_map_path}
+        last_map = fig_map
+
+    return last_map, results
+
+
+def plot_grouped_stacked_feature_importance_from_csvs(
+    base_dir,
+    scope="global",
+    stat="mean",
+    model_type="final",
+    years=(2030, 2050, 2070, 2100),
+    region=None,
+    output_file=None,
+    normalized=True,
+    figsize=(9, 4),
+    bar_width=1.0,
+    legend_fontsize=9,
+    feature_colors=None,
+    feature_order=None,
+    group_map: Dict[str, List[str]] = None,
+    group_colors: Dict[str, str] = None,
+    # Default feature order and colors if no grouping is provided
+    FEATURE_ORDER=["Scenario", "Regret", "Welfare", "Optimization", "Sample"],
+    FEATURE_COLORS={
+        "Scenario": "#8da0cb",
+        "Regret": "#b2e2e2",
+        "Welfare": "#66c2a4",
+        "Optimization": "#238b45",
+        "Sample": "#fc8d62",
+    },
+    # Default colors for grouped bars; feel free to tweak
+    GROUP_COLORS={
+        "Deep Uncertainty": "#8da0cb",
+        "Normative Uncertainty": "#238b45",
+        "Stochastic Uncertainty": "#fc8d62",
+    },
+):
+    """
+    Builds a stacked bar chart with one bar per year from saved SHAP CSVs.
+    If `group_map` is provided, features are aggregated by group and the legend
+    shows entries like "Deep Uncertainty (Scenario)".
+    """
+    year_order = list(years)
+    feature_order = feature_order if feature_order is not None else FEATURE_ORDER
+    feature_colors = feature_colors if feature_colors is not None else FEATURE_COLORS
+
+    kind = "shap_full" if model_type == "final" else "shap_cv"
+    root = Path(base_dir) / scope.lower() / stat.lower()
+    if not root.exists():
+        raise FileNotFoundError(f"Directory not found: {root}")
+
+    def read_importance_csv(path: Path):
+        if not path.exists():
+            return None
+        df = pd.read_csv(path)
+        if not {"Feature", "Importance"}.issubset(df.columns):
+            raise ValueError(f"{path} must contain 'Feature' and 'Importance' columns")
+        s = df.set_index("Feature")["Importance"]
+        return s.reindex(feature_order, fill_value=0.0)
+
+    sns.set_theme(style="white")
+
+    if group_map:
+        group_order = list(group_map.keys())
+        label_map = {
+            group: f"{group} ({', '.join(group_map[group])})" for group in group_order
+        }
+        group_colors = group_colors if group_colors is not None else GROUP_COLORS
+
+        def aggregate_by_group(df_row):
+            row = {"Year": df_row["Year"]}
+            for group, feats in group_map.items():
+                missing = [f for f in feats if f not in df_row.index]
+                if missing:
+                    raise KeyError(
+                        f"Missing features {missing} required for group '{group}'"
+                    )
+                row[group] = df_row[list(feats)].sum()
+            return row
+
+        def transform_df(df_plot):
+            records = [aggregate_by_group(row) for _, row in df_plot.iterrows()]
+            return (
+                pd.DataFrame(records),
+                group_order,
+                group_colors,
+                label_map,
+                group_map,
+            )
+
+    else:
+
+        def transform_df(df_plot):
+            return df_plot, feature_order, feature_colors, None, None
+
+    def plot_df(raw_df, title=None, outfile=None):
+        df_plot = raw_df.copy()
+        df_plot["Year"] = pd.Categorical(
+            df_plot["Year"], categories=year_order, ordered=True
+        )
+        df_plot = df_plot.sort_values("Year")
+
+        df_stack, stack_order, colors_map, legend_labels, legend_features = (
+            transform_df(df_plot)
+        )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        x_pos = np.arange(len(df_stack))
+        bottoms = np.zeros(len(df_stack))
+
+        for key in stack_order:
+            values = df_stack[key].to_numpy()
+            ax.bar(
+                x_pos,
+                values,
+                width=bar_width,
+                bottom=bottoms,
+                color=colors_map.get(key, "#999999"),
+                label=legend_labels[key] if legend_labels else key,
+                align="center",
+            )
+            bottoms += values
+
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([str(y) for y in df_stack["Year"]])
+        ax.set_xlim(-0.5, len(df_stack) - 0.5)
+        ax.margins(x=0)
+        sns.despine(ax=ax, top=True, right=True, left=False, bottom=False)
+        ax.set_xlabel("")
+        ax.set_ylabel("Importance" + (" (normalized)" if normalized else ""))
+        if title:
+            ax.set_title(title)
+
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles))
+        ordered_handles = [unique[lbl] for lbl in labels if lbl in unique]
+        ax.legend(
+            ordered_handles,
+            [lbl for lbl in labels if lbl in unique],
+            frameon=False,
+            fontsize=legend_fontsize,
+            ncol=1,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+        )
+
+        if outfile:
+            Path(outfile).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(outfile, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+        else:
+            plt.show()
+
+        return fig
+
+    if scope.lower() == "global":
+        rows = []
+        for yr in year_order:
+            fpath = root / f"global_{yr}_{kind}.csv"
+            s = read_importance_csv(fpath)
+            if s is None:
+                continue
+            rows.append(
+                {"Year": yr, **{feat: float(s[feat]) for feat in feature_order}}
+            )
+
+        if not rows:
+            raise FileNotFoundError(
+                f"No CSVs found for scope=global, stat={stat}, kind={kind} in {root}"
+            )
+
+        df_plot = pd.DataFrame(rows)
+        fig = plot_df(df_plot, outfile=output_file)
+        return {"data": df_plot, "figure": fig}
+
+    pattern = re.compile(rf"^(?P<region>.+)_(?P<year>\d{{4}})_{kind}\.csv$")
+    files = [p for p in root.glob("*.csv") if p.is_file()]
+    region_set = set()
+    for p in files:
+        m = pattern.match(p.name)
+        if not m:
+            continue
+        yy = int(m.group("year"))
+        if yy in years:
+            region_set.add(m.group("region"))
+
+    region_list = [region] if region else sorted(region_set)
+    if not region_list:
+        raise FileNotFoundError(
+            f"No regional CSVs found for stat={stat}, kind={kind} in {root}"
+        )
+
+    figs = {}
+    all_rows = []
+
+    for rgn in region_list:
+        rows = []
+        for yr in year_order:
+            fpath = root / f"{rgn}_{yr}_{kind}.csv"
+            s = read_importance_csv(fpath)
+            if s is None:
+                continue
+            rows.append(
+                {
+                    "Region": rgn,
+                    "Year": yr,
+                    **{feat: float(s[feat]) for feat in feature_order},
+                }
+            )
+        if not rows:
+            continue
+
+        df_plot = pd.DataFrame(rows)
+        title = rgn.replace("_", " ")
+        out = None
+        if output_file:
+            outpath = Path(output_file)
+            out = str(Path(outpath.parent) / f"{outpath.stem}_{rgn}{outpath.suffix}")
+
+        fig = plot_df(df_plot, title=title, outfile=out)
+        figs[rgn] = fig
+        all_rows.append(df_plot)
+
+    df_all = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+    return {"data": df_all, "figure": figs}
+
+
+def render_all_grouped_stacked_charts(
+    base_dir,
+    scope="global",
+    stat="mean",
+    model_type="final",
+    years=(2030, 2050, 2070, 2100),
+    output_dir=None,
+    normalized=True,
+    figsize=(9, 6),
+    legend_fontsize=9,
+    bar_width=1.0,
+    group_map: Dict[str, List[str]] = None,
+):
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    kwargs = dict(
+        base_dir=base_dir,
+        stat=stat,
+        model_type=model_type,
+        years=years,
+        output_file=None if output_dir is None else "",
+        normalized=normalized,
+        figsize=figsize,
+        legend_fontsize=legend_fontsize,
+        bar_width=bar_width,
+        group_map=group_map,
+    )
+    if scope.lower() == "global":
+        outfile = (
+            None
+            if output_dir is None
+            else str(Path(output_dir) / f"global_{stat}_{model_type}_stacked.png")
+        )
+        kwargs["scope"] = "global"
+        kwargs["output_file"] = outfile
+        return plot_grouped_stacked_feature_importance_from_csvs(**kwargs)
+    else:
+        outfile = (
+            None
+            if output_dir is None
+            else str(Path(output_dir) / f"regional_{stat}_{model_type}_stacked.png")
+        )
+        kwargs["scope"] = "regional"
+        kwargs["output_file"] = outfile
+        return plot_grouped_stacked_feature_importance_from_csvs(**kwargs)
 
 
 def plot_emission_control_rate(
@@ -4434,48 +5147,3 @@ if __name__ == "__main__":
         show_colorbar=True,
         show_title=False,
     )
-
-    ############################################################################################################
-    # fig = plot_timeseries(
-    #     path_to_data="data/reevaluation/only_welfare_temp/",  # "data/reevaluation",  # /balanced,  # "data/reevaluation",
-    #     path_to_output="./data/plots/regional/only_welfare_temp",  # "./data/plots/regional",
-    #     x_label="Years",
-    #     y_label="Temperature Rise (°C)",
-    #     variable_name="global_temperature",
-    #     input_data=[
-    #         "UTILITARIAN_reference_set_idx16.pkl",
-    #         "PRIORITARIAN_reference_set_idx196.pkl",
-    #         # "UTILITARIAN_reference_set_idx51.pkl",
-    #         # "UTILITARIAN_reference_set_idx51_idx62.pkl",
-    #         # "PRIORITARIAN_reference_set_idx817.pkl",
-    #         # "PRIORITARIAN_reference_set_idx817_idx59.pkl",
-    #         # "UTILITARIAN_reference_set_idx88.pkl",
-    #         # "PRIORITARIAN_reference_set_idx748.pkl",
-    #         # "SUFFICIENTARIAN_reference_set_idx99.pkl",
-    #         # "EGALITARIAN_reference_set_idx147.pkl",
-    #     ],
-    #     output_titles=[
-    #         "Utilitarian",
-    #         "Prioritarian",
-    #         # "Sufficientarian",
-    #         # "Egalitarian",
-    #     ],
-    #     main_title="Global Temperature Rise - ",
-    #     show_title=False,
-    #     saving=True,
-    #     yaxis_lower_limit=0,
-    #     yaxis_upper_limit=6,
-    #     alpha=0.1,
-    #     linewidth=2.5,
-    #     start_year=2015,
-    #     end_year=2300,
-    #     visualization_start_year=2025,
-    #     visualization_end_year=2100,
-    #     scenario_list=[
-    #         "SSP119",
-    #         "SSP245",
-    #         "SSP370",
-    #         "SSP434",
-    #         "SSP585",
-    #     ],  # ['SSP119', 'SSP126', 'SSP245', 'SSP370', 'SSP434', 'SSP460', 'SSP534', 'SSP585'], # #
-    # )
