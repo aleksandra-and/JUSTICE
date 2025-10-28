@@ -3071,6 +3071,7 @@ def plot_choropleth_2D_data(
     tickvals=[0, 0.25, 0.5, 0.75, 1],
     ticktext=["0%", "25%", "50%", "75%", "100%"],
     plot_saving_format="svg",
+    show_frame=False,
 ):
 
     # Assert if input_data list and output_titles list is None
@@ -3190,24 +3191,39 @@ def plot_choropleth_2D_data(
                     "x": 0.5,
                     "y": 0.95,
                 },
+                # Remove the frame around the map
+                geo=dict(showframe=False),
             )
+
+            if show_frame:
+                fig.update_layout(
+                    geo=dict(showframe=True, framecolor="black", framewidth=1)
+                )
         else:
-            fig.update_layout(title_text="")
+            fig.update_layout(
+                title_text="",
+                geo=dict(showframe=False),
+            )
+
+            if show_frame:
+                fig.update_layout(
+                    geo=dict(showframe=True, framecolor="black", framewidth=1)
+                )
 
         # Policy index number
         filename = file.split(".")[0]
-        # filename = (
-        #     filename.split("_")[0]
-        #     + filename.split("_")[1]
-        #     + "_"
-        #     + filename.split("_")[-1]
-        # )
+
+        # TODO: This is a hotfix - change this later
+        # filename = filename.split("_")
+        # # Keep index 0 to 5 and the last element and combine them to create the new filename string
+        # filename = "_".join(filename[0:6] + [filename[11]] + [filename[-1]])
+        # print("Saving file: ", filename)
 
         output_file_name = filename
         if saving:
             # Check if path to output exists
-            # if not os.path.exists(path_to_output):
-            #     os.makedirs(path_to_output)
+            if not os.path.exists(path_to_output):
+                os.makedirs(path_to_output)
 
             if plot_saving_format == "png":
                 fig.write_image(
