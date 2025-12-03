@@ -37,4 +37,4 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["justice", "rl", "solvers", "analysis"]
+packages = ["justice", "rl", "solvers", "analysis", "config", "data"]
