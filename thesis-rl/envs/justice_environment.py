@@ -25,8 +25,8 @@ class JusticeEnvironment(ParallelEnv):
         "name": "justice_environment_v0",
     }
 
-    def __init__(self):
-        self.possible_agents = [f"region_{i}" for i in range(1, 5 + 1)]
+    def __init__(self, args=None):
+        self.possible_agents = [f"region_{i}" for i in range(1, args.num_agents + 1)]
         self.agents = None
         self.timestep = None
         self.model = JUSTICE(
@@ -35,7 +35,7 @@ class JusticeEnvironment(ParallelEnv):
             damage_function_type=DamageFunction.KALKUHL,
             abatement_type=Abatement.ENERDATA,
             social_welfare_function=WelfareFunction.UTILITARIAN,  # WelfareFunction.UTILITARIAN,
-            climate_ensembles=[1001], # climate uncertainty ensembles
+            climate_ensembles=[33], # climate uncertainty ensembles
             clustering=True,
             cluster_level=len(self.possible_agents),
             stochastic_run=False,
@@ -46,12 +46,12 @@ class JusticeEnvironment(ParallelEnv):
         self.emissions_control_rate = None
         self.num_steps = self.end_year - self.start_year
         self.action_change = None
+        self.reward = args.reward  # 'consumption_per_capita' or 'stepwise_marl_reward'
         
 
     def reset(self, seed=None, options=None):
         # Currently seed not used
-        self.seed = seed
-        self.possible_agents = [f"region_{i}" for i in range(1, 5 + 1)] 
+        self.seed = seed 
         self.agents = copy(self.possible_agents)
         self.model.reset() # Reset the model to its initial state
         
@@ -70,7 +70,7 @@ class JusticeEnvironment(ParallelEnv):
 
     def step(self, actions):
         # Get corresponding actions for all agents
-        self.emissions_control_rate[:, self.timestep] = [actions[agent] * 0.25 for agent in self.agents]
+        self.emissions_control_rate[:, self.timestep] = [actions[agent] * 0.1 for agent in self.agents]
         
         # Run the model for the current timestep
         self.model.stepwise_run(emission_control_rate = self.emissions_control_rate[:, self.timestep], timestep=self.timestep, endogenous_savings_rate=True)
@@ -122,7 +122,7 @@ class JusticeEnvironment(ParallelEnv):
     
     def get_rewards(self, data):
         rewards = {
-            agent: 1 / data["regional_temperature"][i, self.timestep] 
+            agent: data[self.reward][i, self.timestep] 
             # or stepwise_marl_reward | consumption_per_capita
             for i, agent in enumerate(self.agents)
         }
@@ -134,7 +134,7 @@ class JusticeEnvironment(ParallelEnv):
             print("No data to render yet.")
             return
         
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 15))
         years = range(self.start_year, self.start_year + self.emissions_control_rate.shape[1])
         
         # Plot emissions control rate
@@ -165,6 +165,18 @@ class JusticeEnvironment(ParallelEnv):
         ax2.legend()
         ax2.grid(True)
         
+        # Plot net economic output per agent
+        net_econ_output = data['net_economic_output'][:, 0:self.num_steps, :]
+        for i, agent in enumerate(self.possible_agents):
+            agent_output = net_econ_output[i, :, :].mean(axis=1)
+            ax3.plot(temp_years, agent_output, label=agent)
+        
+        ax3.set_xlabel('Year')
+        ax3.set_ylabel('Net Economic Output')
+        ax3.set_title('Net Economic Output per Agent')
+        ax3.legend()
+        ax3.grid(True)
+        
         plt.tight_layout()
         plt.savefig(filename)
         plt.close()
@@ -184,6 +196,6 @@ class JusticeEnvironment(ParallelEnv):
     
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        return Discrete(4)  
+        return Discrete(11)
     
     

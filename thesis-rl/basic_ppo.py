@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 import time
+import os
 
 from envs.justice_environment import JusticeEnvironment
 from agents.basic_agent import Agent
@@ -32,6 +33,7 @@ def unbatchify(x, env):
 if __name__ == "__main__":
     # Hyperparameters
     device = torch.device("cpu")
+    # Learning hyperparameters
     learning_rate = 3e-4
     gamma = 0.99
     gae_lambda = 0.95
@@ -39,10 +41,13 @@ if __name__ == "__main__":
     ent_coef = 0.01
     vf_coef = 0.5
     minibatch_size = 128
-    update_epochs = 4
-    total_episodes = 1000
-    print_interval = 100
+    # Training length
+    total_episodes = 100000
+    print_interval = 50
+    
     folder = "exp_results/recent_run"
+    if not os.path.exists(f"{folder}/checkpoints"):
+        os.makedirs(f"{folder}/checkpoints")
 
     # Environment setup
     env = JusticeEnvironment()
@@ -70,13 +75,15 @@ if __name__ == "__main__":
     """ TRAINING LOGIC """
     # train for n number of episodes
     start_time = time.time()
+    returns_history = np.zeros((total_episodes, num_agents))
     for episode in range(total_episodes):
+        # reset the episodic return
+        total_episodic_return = np.zeros(num_agents)
+        
         # collect an episode
         with torch.no_grad():
             # collect observations and convert to batch of torch tensors
             next_obs, info = env.reset(seed=None)
-            # reset the episodic return
-            total_episodic_return = 0
 
             # each episode has num_steps
             for step in range(0, max_cycles):
@@ -106,7 +113,8 @@ if __name__ == "__main__":
                 if any([terms[a] for a in terms]) or any([truncs[a] for a in truncs]):
                     end_step = step
                     break
-        
+            
+        returns_history[episode] = total_episodic_return
         # bootstrap value if not done
         with torch.no_grad():
             rb_advantages = torch.zeros_like(rb_rewards).to(device)
@@ -204,9 +212,10 @@ if __name__ == "__main__":
         if episode % print_interval == 0 and episode > 0:
             torch.save({
                 'episode': episode,
+                'return': total_episodic_return,
                 'model_state_dict': agent.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-            }, f"{folder}/checkpoint_ep{episode}.pt")
+            }, f"{folder}/checkpoints/checkpoint_ep{episode}.pt")
 
     # Final save
     torch.save(agent.state_dict(), f"{folder}/justice_ppo_final.pt")
@@ -230,7 +239,7 @@ if __name__ == "__main__":
             terms = [terms[a] for a in terms]
             truncs = [truncs[a] for a in truncs]
             
-            episode_return += sum(rewards.values())
+            episode_return += batchify(rewards).cpu().numpy()
             step_count += 1
         
         print(f"Eval: Return = {episode_return}, Steps = {step_count}")
@@ -240,10 +249,10 @@ if __name__ == "__main__":
     # Plot
     import matplotlib.pyplot as plt
     plt.figure(figsize=(10, 6))
-    plt.plot(total_episodic_return)
+    plt.plot(returns_history.sum(axis=1))
     plt.xlabel('Episode')
     plt.ylabel('Total Return')
     plt.title('Learning Curve')
     plt.grid(True)
-    plt.savefig('learning_curve.png')
+    plt.savefig(f"{folder}/learning_curve.png")
     print("Learning curve saved")
