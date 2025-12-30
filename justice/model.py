@@ -134,7 +134,7 @@ class JUSTICE:
                 with open("data/input/rice_12_regions_dict.json") as f:
                     rice_json = json.load(f)
             elif self.cluster_level == 5:
-                with open("data/input/5_regions.json") as f:
+                with open("data/input/R5_regions.json") as f:
                     rice_json = json.load(f)
             else:
                 raise ValueError("Cluster level not supported")

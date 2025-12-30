@@ -1,3 +1,5 @@
+# Traninig implementation of PPO from: https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_pettingzoo_ma_atari.py
+
 import matplotlib.pyplot as plt
 import numpy as np
 from copy import copy
@@ -20,13 +22,20 @@ LOCAL_OBSERVATIONS = [  # local observations, not shared with other agents
 
 GLOBAL_OBSERVATIONS = ["global_temperature"]  # global observations, same for all agents
 
+ALL_OBSERVATIONS = LOCAL_OBSERVATIONS + GLOBAL_OBSERVATIONS
+
 class JusticeEnvironment(ParallelEnv):
     metadata = {
         "name": "justice_environment_v0",
     }
 
-    def __init__(self, args=None):
+    def __init__(self, args=None, render_mode=None):
+        # For testing purposes
+        if args is None:
+            args = type('obj', (object,), {'num_agents': 5, 'reward': 'consumption_per_capita'})()
+         
         self.possible_agents = [f"region_{i}" for i in range(1, args.num_agents + 1)]
+        self.render_mode = render_mode
         self.agents = None
         self.timestep = None
         self.model = JUSTICE(
@@ -35,7 +44,7 @@ class JusticeEnvironment(ParallelEnv):
             damage_function_type=DamageFunction.KALKUHL,
             abatement_type=Abatement.ENERDATA,
             social_welfare_function=WelfareFunction.UTILITARIAN,  # WelfareFunction.UTILITARIAN,
-            climate_ensembles=[33], # climate uncertainty ensembles
+            climate_ensembles=[885, 415, 944, 747, 455], # climate uncertainty ensembles
             clustering=True,
             cluster_level=len(self.possible_agents),
             stochastic_run=False,
@@ -44,7 +53,7 @@ class JusticeEnvironment(ParallelEnv):
         self.start_year = 2015
         self.end_year = 2300
         self.emissions_control_rate = None
-        self.num_steps = self.end_year - self.start_year
+        self.num_years = self.end_year - self.start_year
         self.action_change = None
         self.reward = args.reward  # 'consumption_per_capita' or 'stepwise_marl_reward'
         
@@ -60,7 +69,7 @@ class JusticeEnvironment(ParallelEnv):
         # self.end_year = 2300
         # self.num_steps = self.end_year - self.start_year
         self.action_change = 1 # regions can change their actions by max 0.1 per step
-        self.emissions_control_rate = np.zeros((len(self.agents), self.num_steps))
+        self.emissions_control_rate = np.zeros((len(self.agents), self.num_years))
         
         observations = self.get_observations(self.model.stepwise_evaluate(timestep=self.timestep), None)
         infos = {a: {} for a in self.agents}
@@ -80,13 +89,13 @@ class JusticeEnvironment(ParallelEnv):
         observations = self.get_observations(data, actions)
         rewards = self.get_rewards(data)
         done = (
-            self.timestep >= self.num_steps - 1
+            self.timestep >= self.num_years - 1
         )  # ends when the last year is reached
         terminated = {agent: done for agent in self.agents}
         truncated = {agent: False for agent in self.agents}
         infos = {a: {} for a in self.agents}
         
-        if self.timestep >= self.num_steps - 1:
+        if self.timestep >= self.num_years - 1:
             # Remove agents if done
             self.agents = []
         else:
@@ -112,7 +121,7 @@ class JusticeEnvironment(ParallelEnv):
         )
         
         observations = {
-            agent: np.concatenate((np.array([self.timestep/self.num_steps, i/len(self.agents)], dtype=np.float32), 
+            agent: np.concatenate((np.array([self.timestep/self.num_years, i/len(self.agents)], dtype=np.float32), 
                                    local_obs[:, i], global_obs, 
                                    self.emissions_control_rate[:, self.timestep].astype(np.float32)))
             for i, agent in enumerate(self.agents)
@@ -120,12 +129,23 @@ class JusticeEnvironment(ParallelEnv):
         
         return observations
     
+    def get_observations_ids(self):
+        return ALL_OBSERVATIONS
+    
     def get_rewards(self, data):
-        rewards = {
-            agent: data[self.reward][i, self.timestep] 
-            # or stepwise_marl_reward | consumption_per_capita
-            for i, agent in enumerate(self.agents)
-        }
+        rewards = {}
+        if self.reward == 'regional_temperature':
+            rewards = {
+                agent: 1.0 / data[self.reward][i, self.timestep].mean()
+                # or stepwise_marl_reward | consumption_per_capita
+                for i, agent in enumerate(self.agents)
+            }
+        else:
+            rewards = {
+                agent: data[self.reward][i, self.timestep].mean()
+                # or stepwise_marl_reward | consumption_per_capita
+                for i, agent in enumerate(self.agents)
+            }
          
         return rewards
 
@@ -149,7 +169,7 @@ class JusticeEnvironment(ParallelEnv):
         
         # Plot global temperature
         data = self.model.stepwise_evaluate(timestep=self.timestep)
-        global_temp = data['global_temperature'][0:self.num_steps, :]
+        global_temp = data['global_temperature'][0:self.num_years, :]
         
         # If global_temp is 2D (timesteps x ensembles), take mean across ensembles
         if global_temp.ndim > 1:
@@ -166,7 +186,7 @@ class JusticeEnvironment(ParallelEnv):
         ax2.grid(True)
         
         # Plot net economic output per agent
-        net_econ_output = data['net_economic_output'][:, 0:self.num_steps, :]
+        net_econ_output = data['net_economic_output'][:, 0:self.num_years, :]
         for i, agent in enumerate(self.possible_agents):
             agent_output = net_econ_output[i, :, :].mean(axis=1)
             ax3.plot(temp_years, agent_output, label=agent)
@@ -179,6 +199,7 @@ class JusticeEnvironment(ParallelEnv):
         
         plt.tight_layout()
         plt.savefig(filename)
+        plt.title(f'Justice Environment Results - For {self.reward} Reward')
         plt.close()
 
     @functools.lru_cache(maxsize=None)
