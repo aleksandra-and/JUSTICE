@@ -21,4 +21,5 @@ source /home/aandrasz/JUSTICE/env/bin/activate
 export PYTHONPATH=/home/aandrasz/JUSTICE:$PYTHONPATH
 
 # Run training script from JUSTICE root
-srun python thesis-rl/train.py --total_episodes 1000000 --backup_interval 1000 > run.log
+# reward can be: 'stepwise_marl_reward', 'consumption_per_capita', 'regional_temperature', 'global_temperature'
+srun python thesis_rl/train.py --total_episodes 20000 --backup_interval 1000 --reward 'stepwise_marl_reward' > run.log

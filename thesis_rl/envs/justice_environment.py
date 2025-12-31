@@ -121,8 +121,8 @@ class JusticeEnvironment(ParallelEnv):
         )
         
         observations = {
-            agent: np.concatenate((np.array([self.timestep/self.num_years, i/len(self.agents)], dtype=np.float32), 
-                                   local_obs[:, i], global_obs, 
+            agent: np.concatenate((local_obs[:, i], global_obs, 
+                                   np.array([self.timestep/self.num_years, i/len(self.agents)], dtype=np.float32), 
                                    self.emissions_control_rate[:, self.timestep].astype(np.float32)))
             for i, agent in enumerate(self.agents)
         }
@@ -137,7 +137,11 @@ class JusticeEnvironment(ParallelEnv):
         if self.reward == 'regional_temperature':
             rewards = {
                 agent: 1.0 / data[self.reward][i, self.timestep].mean()
-                # or stepwise_marl_reward | consumption_per_capita
+                for i, agent in enumerate(self.agents)
+            }
+        if self.reward == 'global_temperature':
+            rewards = {
+                agent: 1.0 / data[self.reward][self.timestep].mean()
                 for i, agent in enumerate(self.agents)
             }
         else:
@@ -208,9 +212,9 @@ class JusticeEnvironment(ParallelEnv):
                 low=-np.inf,
                 high=np.inf,
                 shape=(
+                    len(LOCAL_OBSERVATIONS) + len(GLOBAL_OBSERVATIONS) +
                     2 + # timestep and agent id
-                    len(LOCAL_OBSERVATIONS) + len(GLOBAL_OBSERVATIONS) 
-                    + len(self.possible_agents),
+                    + len(self.possible_agents), # emissions control rates
                 ),
                 dtype=np.float32,
             )

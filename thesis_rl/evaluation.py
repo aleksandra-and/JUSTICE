@@ -5,6 +5,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import torch
 from thesis_rl.agents.basic_agent import Agent
+from tensorboard.backend.event_processing import event_accumulator
 
 
 def batchify_obs(obs):
@@ -21,6 +22,18 @@ def unbatchify(x, env):
     """Converts tensor to PZ dict."""
     x = x.numpy()
     return {a: x[i] for i, a in enumerate(env.possible_agents)}
+
+LOCAL_OBSERVATIONS = [  # local observations, not shared with other agents
+    "net_economic_output",
+    "regional_temperature", # can remove
+    "economic_damage",
+    "abatement_cost",
+    "emissions",
+]
+
+GLOBAL_OBSERVATIONS = ["global_temperature"]  # global observations, same for all agents
+
+ALL_OBSERVATIONS = LOCAL_OBSERVATIONS + GLOBAL_OBSERVATIONS
 
 class Eval:
     
@@ -76,5 +89,67 @@ class Eval:
         print(f"Avg Episodic Return: {np.mean(total_episodic_return, axis=0):.2f}")
         return total_episodic_return
     
-    def plot_training_results(self, run_name=None):
-        pass
+    def plot_training_results(self, run_file=None):
+        """Plot training metrics from TensorBoard events file."""
+        if run_file is None:
+            raise ValueError("run_file must be provided")
+        
+        # Construct full path
+        events_file = os.path.join(self.folder, run_file)
+        
+        if not os.path.exists(events_file):
+            raise FileNotFoundError(f"Events file not found: {events_file}")
+        
+        # Parse TensorBoard events file
+        ea = event_accumulator.EventAccumulator(events_file)
+        ea.Reload()
+        
+        # Extract all scalar data
+        data = {}
+        for tag in ea.Tags()['scalars']:
+            events = ea.Scalars(tag)
+            data[tag] = {
+                'steps': [e.step for e in events],
+                'values': [e.value for e in events]
+            }
+        
+        # Create plots
+        chart_tags = [tag for tag in data.keys() if tag.startswith('charts/')]
+        num_charts = len(chart_tags)
+        
+        fig, axes = plt.subplots(num_charts, 1, figsize=(12, 3 * num_charts))
+        fig.suptitle('MAPPO Training Results - Observations Over Time', fontsize=16)
+        
+        # Handle single subplot case
+        if num_charts == 1:
+            axes = [axes]
+        
+        # Plot all charts
+        for idx, tag in enumerate(sorted(chart_tags)):
+            axes[idx].plot(data[tag]['steps'], data[tag]['values'])
+            title = tag.replace('charts/', '').replace('_', ' ').title()
+            axes[idx].set_title(title)
+            axes[idx].set_xlabel('Global Step')
+            axes[idx].set_ylabel('Value')
+            axes[idx].grid(True)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        output_path = os.path.join(self.folder, 'training_results.png')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Training results plot saved to: {output_path}")
+        
+        return data
+        
+    
+    
+if __name__ == "__main__":
+    save_folder = "exp_results/runs/mappo_31:12:25/MAPPO_stepwise_marl_reward_100episodes_1767187416/"
+    evaluator = Eval(
+        args=type('obj', (object,), {
+            'save_folder': save_folder
+        })
+    )  
+    run_file="events.out.tfevents.1767187416.Lena.99972.0"
+    evaluator.plot_training_results(run_file=run_file)

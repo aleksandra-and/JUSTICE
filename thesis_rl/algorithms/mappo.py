@@ -43,7 +43,7 @@ class MAPPO:
         self.num_minibatches = 285 # the same as number of timesteps
         self.update_epochs = 4
         
-        timestamp = datetime.now().strftime("%d:%m:%y_%H:%M")
+        timestamp = datetime.now().strftime("%d:%m:%y")
         self.folder = args.save_folder + f"/mappo_{timestamp}"
         if not os.path.exists(f"{self.folder}"):
             os.makedirs(f"{self.folder}")
@@ -57,7 +57,7 @@ class MAPPO:
 
         print(f"Training MAPPO for {self.total_episodes} with reward: {jenv.reward}")
         print(f"Agents: {num_agents}, Actions: {num_actions}, Obs size: {obs_size}\n")
-        run_name = f"MAPPO_{jenv.reward}_{self.total_episodes}episodes"
+        run_name = f"MAPPO_{jenv.reward}_{self.total_episodes}eps_{time.time():.0f}"
         writer = SummaryWriter(f"{self.folder}/{run_name}")
 
         """ LEARNER SETUP """
@@ -115,16 +115,6 @@ class MAPPO:
                 next_obs, reward, done, _, info = envs.step(action.cpu().numpy())
                 rewards[step] = torch.tensor(reward).to(self.device).view(-1)
                 next_obs, next_done = torch.Tensor(next_obs).to(self.device), torch.Tensor(done).to(self.device)
-
-            # log observations, rewards
-            if update % self.print_interval == 0:
-                writer.add_scalar("charts/mean_episodic_return", rewards.mean(), global_step)
-                for obs_idx, observation_names in enumerate(jenv.get_observations_ids()):
-                    writer.add_scalar(f"charts/final_{observation_names}", next_obs[:, obs_idx].mean(), global_step)
-            
-                print(f"Update: {update}, Global Step: {global_step}")
-                print(f"    Mean Final Return: {rewards[self.num_steps - 1].mean():.5f}")
-                print(f"    Mean Episodic Return: {rewards.mean():.5f}\n")
 
             # bootstrap value if not done
             with torch.no_grad():
@@ -211,21 +201,35 @@ class MAPPO:
             var_y = np.var(y_true)
             explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
+            """ LOGGING """
+            
+            # print observations, rewards
             if update % self.print_interval == 0:
-                # TRY NOT TO MODIFY: record rewards for plotting purposes
-                writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-                writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-                writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-                writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-                writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-                writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-                writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-                writer.add_scalar("losses/explained_variance", explained_var, global_step)
-                #print("SPS:", int(global_step / (time.time() - start_time)))
-                writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                print(f"Update: {update}, Global Step: {global_step}")
+                print(f"    Mean Final Return: {rewards[self.num_steps - 1].mean():.5f}")
+                print(f"    Mean Episodic Return: {rewards.sum(dim=0).mean():.5f}")
+                for obs_idx, observation_names in enumerate(jenv.get_observations_ids()):
+                    print(f"    Mean {observation_names}: {obs[-1, :, obs_idx].mean():.5f}")
+                print("\n")
+                
+            writer.add_scalar("charts/mean_episodic_return", rewards.sum(dim=0).mean(), global_step)
+            for obs_idx, observation_names in enumerate(jenv.get_observations_ids()):
+                writer.add_scalar(f"charts/final_{observation_names}", obs[-1, :, obs_idx].mean(), global_step)
+            
+            # TRY NOT TO MODIFY: record rewards for plotting purposes
+            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+            writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+            writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+            writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+            writer.add_scalar("losses/explained_variance", explained_var, global_step)
+            #print("SPS:", int(global_step / (time.time() - start_time)))
+            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
         envs.close()
         writer.close()
         # Final save
-        torch.save(self.agent.state_dict(), f"{self.folder}/justice_ppo_final.pt")
+        torch.save(self.agent.state_dict(), f"{self.folder}/{run_name}/final_mappo_agent.pt")
         print(f"\nTraining complete! Total time: {time.time() - start_time:.1f}s")
