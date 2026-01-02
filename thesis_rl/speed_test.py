@@ -9,28 +9,43 @@ if __name__ == "__main__":
     env = JusticeEnvironment()
     observations, infos = env.reset()
 
-    num_episodes = 10
-    total_steps = 0
+    num_episodes = 50
     start_time = time.time()
 
     for episode in range(num_episodes):
         observations, infos = env.reset()
         done = {agent: False for agent in env.agents}
-        episode_steps = 0
 
         while not all(done.values()):
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
             observations, rewards, done, truncated, infos = env.step(actions)
-            episode_steps += 1
-
-        total_steps += episode_steps
+            
         
     end_time = time.time()
     elapsed_time = end_time - start_time
-    steps_per_second = total_steps / elapsed_time
 
     print(f"Total episodes: {num_episodes}")
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
+    print(f"Avg Episode Time: {elapsed_time/num_episodes:.2f} seconds")
+    
+    from thesis_rl.train import TrainArgs, EnvArgs
+    from thesis_rl.algorithms.mappo import MAPPO
+    start_time = time.time()
+    train_args = TrainArgs()
+    train_args.total_episodes = num_episodes
+    train_args.backup_interval = num_episodes + 1  # No backups
+    env_args = EnvArgs(reward=train_args.reward, num_agents=train_args.num_agents)
+    env = JusticeEnvironment(env_args)
+    trainer = MAPPO(train_args)
+
+    trainer.train_mappo(env)
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    print(f"Total episodes: {num_episodes}")
+    print(f"Elapsed time: {elapsed_time:.2f} seconds")
+    print(f"Avg Episode Time: {elapsed_time/num_episodes:.2f} seconds")
     
     # model = JUSTICE(
     #     scenario=2, # SSP scenarios

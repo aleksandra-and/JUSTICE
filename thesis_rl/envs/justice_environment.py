@@ -12,18 +12,6 @@ from justice.model import JUSTICE
 from justice.util.enumerations import *
 import seaborn as sns
 
-LOCAL_OBSERVATIONS = [  # local observations, not shared with other agents
-    "net_economic_output",
-    "regional_temperature", # can remove
-    "economic_damage",
-    "abatement_cost",
-    "emissions",
-]
-
-GLOBAL_OBSERVATIONS = ["global_temperature"]  # global observations, same for all agents
-
-ALL_OBSERVATIONS = LOCAL_OBSERVATIONS + GLOBAL_OBSERVATIONS
-
 class JusticeEnvironment(ParallelEnv):
     metadata = {
         "name": "justice_environment_v0",
@@ -33,7 +21,18 @@ class JusticeEnvironment(ParallelEnv):
         # For testing purposes
         if args is None:
             args = type('obj', (object,), {'num_agents': 5, 'reward': 'consumption_per_capita'})()
-         
+        
+        self.LOCAL_OBSERVATIONS = [  # local observations, not shared with other agents
+            "net_economic_output",
+            "regional_temperature", # can remove
+            "economic_damage",
+            "abatement_cost",
+            "emissions",
+        ]
+
+        self.GLOBAL_OBSERVATIONS = ["global_temperature"]  # global observations, same for all agents
+        
+        
         self.possible_agents = [f"region_{i}" for i in range(1, args.num_agents + 1)]
         self.render_mode = render_mode
         self.agents = None
@@ -108,21 +107,20 @@ class JusticeEnvironment(ParallelEnv):
         local_obs = np.array(
             [
                 data[key][:, self.timestep, :].mean(axis=1)
-                for key in LOCAL_OBSERVATIONS
+                for key in self.LOCAL_OBSERVATIONS
             ],
             dtype=np.float32,
         )
         global_obs = np.array(
             [
                 data[key][self.timestep, :].mean(axis=0)
-                for key in GLOBAL_OBSERVATIONS
+                for key in self.GLOBAL_OBSERVATIONS
             ],
             dtype=np.float32
         )
         
         observations = {
             agent: np.concatenate((local_obs[:, i], global_obs, 
-                                   np.array([self.timestep/self.num_years, i/len(self.agents)], dtype=np.float32), 
                                    self.emissions_control_rate[:, self.timestep].astype(np.float32)))
             for i, agent in enumerate(self.agents)
         }
@@ -130,7 +128,7 @@ class JusticeEnvironment(ParallelEnv):
         return observations
     
     def get_observations_ids(self):
-        return ALL_OBSERVATIONS
+        return self.LOCAL_OBSERVATIONS + self.GLOBAL_OBSERVATIONS
     
     def get_rewards(self, data):
         rewards = {}
@@ -153,6 +151,52 @@ class JusticeEnvironment(ParallelEnv):
          
         return rewards
 
+    def get_state(self):
+        # Global observations
+        data = self.model.stepwise_evaluate(timestep=self.timestep)
+        global_obs = np.array(
+            [
+                data[key][self.timestep, :].mean(axis=0)
+                for key in self.GLOBAL_OBSERVATIONS
+            ],
+            dtype=np.float32
+        )
+        
+        state = np.concatenate((
+            global_obs,
+            self.emissions_control_rate[:, self.timestep].astype(np.float32)
+        ))
+        
+        return state
+    
+    @functools.lru_cache(maxsize=None)
+    def observation_space(self, agent):
+        return Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(
+                    len(self.LOCAL_OBSERVATIONS) + len(self.GLOBAL_OBSERVATIONS) +
+                    + len(self.possible_agents), # emissions control rates
+                ),
+                dtype=np.float32,
+            )
+    
+    @functools.lru_cache(maxsize=None)
+    def action_space(self, agent):
+        return Discrete(11)
+    
+    @functools.lru_cache(maxsize=None)
+    def state_space(self):
+        return Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(
+                    len(self.GLOBAL_OBSERVATIONS)
+                    + len(self.possible_agents), # emissions control rates
+                ),
+                dtype=np.float32,
+            )
+        
     def render(self, filename='agents_emissions_control_rate.png'):
         if self.emissions_control_rate is None:
             print("No data to render yet.")
@@ -205,22 +249,4 @@ class JusticeEnvironment(ParallelEnv):
         plt.savefig(filename)
         plt.title(f'Justice Environment Results - For {self.reward} Reward')
         plt.close()
-
-    @functools.lru_cache(maxsize=None)
-    def observation_space(self, agent):
-        return Box(
-                low=-np.inf,
-                high=np.inf,
-                shape=(
-                    len(LOCAL_OBSERVATIONS) + len(GLOBAL_OBSERVATIONS) +
-                    2 + # timestep and agent id
-                    + len(self.possible_agents), # emissions control rates
-                ),
-                dtype=np.float32,
-            )
-    
-    @functools.lru_cache(maxsize=None)
-    def action_space(self, agent):
-        return Discrete(11)
-    
-    
+        print(f"Render saved to: {filename}\n")

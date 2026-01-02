@@ -1,0 +1,3 @@
+[submodule "thesis_rl/HARL"]
+	path = thesis_rl/HARL
+	url = git@github.com:aleksandra-and/HARL.git
