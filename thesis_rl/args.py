@@ -16,3 +16,5 @@ class EnvArgs:
     reward: str # Type of reward to use. 
     # Can also use "consumption_per_capita", "regional_temperature"
     num_agents: int # Number of agents  
+    ensables: list
+    env_name: str

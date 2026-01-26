@@ -43,18 +43,19 @@ class JusticeEnvironment(ParallelEnv):
             damage_function_type=DamageFunction.KALKUHL,
             abatement_type=Abatement.ENERDATA,
             social_welfare_function=WelfareFunction.UTILITARIAN,  # WelfareFunction.UTILITARIAN,
-            climate_ensembles=[885, 415, 944, 747, 455], # climate uncertainty ensembles
+            climate_ensembles=args.ensables, # climate uncertainty ensembles
             clustering=True,
             cluster_level=len(self.possible_agents),
             stochastic_run=False,
         )
+        
         self.timestep = None
         self.start_year = 2015
         self.end_year = 2300
-        self.emissions_control_rate = None
+        self.agent_emissions_control_rate = None
         self.num_years = self.end_year - self.start_year
-        self.action_change = None
-        self.reward = args.reward  # 'consumption_per_capita' or 'stepwise_marl_reward'
+        self.action_change = 2  # regions can change their actions by max 0.2 per step
+        self.reward = args.reward  # 'global_temperature' 'consumption_per_capita' or 'stepwise_marl_reward'
         
 
     def reset(self, seed=None, options=None):
@@ -67,21 +68,33 @@ class JusticeEnvironment(ParallelEnv):
         # self.start_year = 2015
         # self.end_year = 2300
         # self.num_steps = self.end_year - self.start_year
-        self.action_change = 1 # regions can change their actions by max 0.1 per step
-        self.emissions_control_rate = np.zeros((len(self.agents), self.num_years))
+        self.action_change = 3 # regions can change their actions by max 0.3 per step
+        self.agent_emissions_control_rate = np.zeros((len(self.possible_agents), self.num_years))
         
         observations = self.get_observations(self.model.stepwise_evaluate(timestep=self.timestep), None)
-        infos = {a: {} for a in self.agents}
+        self.action_mask = {agent: self.get_avail_agent_actions(i) for i, agent in enumerate(self.agents)}
+        infos = {
+                a: {
+                    'rewards': [],
+                    'action_mask': self.action_mask[a],
+                } 
+                for i, a in enumerate(self.agents)
+            }
         
         return observations, infos
         
 
     def step(self, actions):
         # Get corresponding actions for all agents
-        self.emissions_control_rate[:, self.timestep] = [actions[agent] * 0.1 for agent in self.agents]
+        self.agent_emissions_control_rate[:, self.timestep] = [actions[agent] * 0.1 for agent in self.agents]
+        
+        # Convert agent actions to model format
+        unmapped_emmissions = np.zeros(57)
+        for region_idx, cluster_idx in self.model.country_to_cluster.items():
+            unmapped_emmissions[region_idx] = self.agent_emissions_control_rate[cluster_idx, self.timestep]
         
         # Run the model for the current timestep
-        self.model.stepwise_run(emission_control_rate = self.emissions_control_rate[:, self.timestep], timestep=self.timestep, endogenous_savings_rate=True)
+        self.model.stepwise_run(emission_control_rate = self.agent_emissions_control_rate[:, self.timestep], timestep=self.timestep, endogenous_savings_rate=True)
         data = self.model.stepwise_evaluate(timestep=self.timestep)
         
         # Get observations, rewards, done, infos
@@ -92,7 +105,15 @@ class JusticeEnvironment(ParallelEnv):
         )  # ends when the last year is reached
         terminated = {agent: done for agent in self.agents}
         truncated = {agent: False for agent in self.agents}
-        infos = {a: {} for a in self.agents}
+        self.action_mask = {agent: self.get_avail_agent_actions(i) for i, agent in enumerate(self.agents)}
+        infos = {
+                    a: {
+                        'rewards': rewards[a],
+                        'mitigated_emissions': self.agent_emissions_control_rate[i, self.timestep],
+                        'action_mask': self.action_mask[a],
+                    } 
+                    for i, a in enumerate(self.agents)
+                }
         
         if self.timestep >= self.num_years - 1:
             # Remove agents if done
@@ -102,15 +123,48 @@ class JusticeEnvironment(ParallelEnv):
             self.timestep += 1
         
         return observations, rewards, terminated, truncated, infos
+    
+    def get_avail_agent_actions(self, agent_idx):
+        """Returns the available actions for agent_id"""
+        num_actions = self.action_space(agent_idx).n
+        if self.timestep == 0:
+            return [1] * num_actions
+        
+        action_mask = [0] * num_actions
+        last_action = int(self.agent_emissions_control_rate[agent_idx, self.timestep] * 10)
+        
+        range_start = max(0, last_action - self.action_change)
+        range_end = min(num_actions - 1, last_action + self.action_change + 1)
+        
+        action_mask[range_start:range_end] = [1] * (range_end - range_start)
+        return action_mask
+      
+    def cluster_observations(self, obs, num_obs):
+        """Function clusters regions into """
+        clustered_obs = np.zeros((len(self.possible_agents), num_obs))
+        if num_obs == 1:
+            clustered_obs = np.zeros(len(self.possible_agents))
+        
+        for region_idx, cluster_idx in self.model.country_to_cluster.items():
+            if obs.ndim == 1:
+                clustered_obs[cluster_idx] += obs[region_idx]
+            else:
+                clustered_obs[cluster_idx, :] += obs[:, region_idx]
+        
+        return clustered_obs
         
     def get_observations(self, data, actions):        
-        local_obs = np.array(
-            [
-                data[key][:, self.timestep, :].mean(axis=1)
-                for key in self.LOCAL_OBSERVATIONS
-            ],
-            dtype=np.float32,
+        local_obs = self.cluster_observations(
+            np.array(
+                [
+                    data[key][:, self.timestep, :].mean(axis=1)
+                    for key in self.LOCAL_OBSERVATIONS
+                ],
+                dtype=np.float32,
+            ),
+            num_obs = len(self.LOCAL_OBSERVATIONS)
         )
+        
         global_obs = np.array(
             [
                 data[key][self.timestep, :].mean(axis=0)
@@ -118,10 +172,10 @@ class JusticeEnvironment(ParallelEnv):
             ],
             dtype=np.float32
         )
-        
+       
         observations = {
-            agent: np.concatenate((local_obs[:, i], global_obs, 
-                                   self.emissions_control_rate[:, self.timestep].astype(np.float32)))
+            agent: np.concatenate((local_obs[i, :], global_obs, 
+                                   self.agent_emissions_control_rate[:, self.timestep].astype(np.float32)))
             for i, agent in enumerate(self.agents)
         }
         
@@ -131,23 +185,46 @@ class JusticeEnvironment(ParallelEnv):
         return self.LOCAL_OBSERVATIONS + self.GLOBAL_OBSERVATIONS
     
     def get_rewards(self, data):
+        
         rewards = {}
-        if self.reward == 'regional_temperature':
-            rewards = {
-                agent: 1.0 / data[self.reward][i, self.timestep].mean()
-                for i, agent in enumerate(self.agents)
-            }
-        if self.reward == 'global_temperature':
-            rewards = {
-                agent: 1.0 / data[self.reward][self.timestep].mean()
-                for i, agent in enumerate(self.agents)
-            }
-        else:
-            rewards = {
-                agent: data[self.reward][i, self.timestep].mean()
-                # or stepwise_marl_reward | consumption_per_capita
-                for i, agent in enumerate(self.agents)
-            }
+        match self.reward:
+            case 'regional_temperature':
+                observed_reward = data[self.reward][:, self.timestep, :].mean(axis=1)
+                observed_reward = self.cluster_observations(observed_reward, num_obs=1)
+                
+                rewards = {
+                    agent: 1.0 / observed_reward[i]
+                    for i, agent in enumerate(self.agents)
+                }
+            case 'global_temperature':
+                rewards = {
+                    agent: 1.0 / data[self.reward][self.timestep, :].mean()
+                    for i, agent in enumerate(self.agents)
+                }
+            case 'stepwise_marl_reward':
+                observed_reward = data[self.reward][:, self.timestep]
+                observed_reward = self.cluster_observations(observed_reward, num_obs=1)
+            
+                rewards = {
+                    agent: observed_reward[i]
+                    # or stepwise_marl_reward | consumption_per_capita
+                    for i, agent in enumerate(self.agents)
+                }
+            # case 'consumption_per_capita':
+            #     observed_reward = data[self.reward][:, self.timestep, :].mean(axis=1)
+            #     clustered_consumption = np.zeros(len(self.possible_agents))
+                
+            #     for region_idx, cluster_idx in self.model.country_to_cluster.items():
+            #         clustered_consumption[cluster_idx] += observed_reward[region_idx] * self.model.region_populations[region_idx, self.start_year + self.timestep]
+            case _:
+                observed_reward = data[self.reward][:, self.timestep, :].mean(axis=1)
+                observed_reward = self.cluster_observations(observed_reward, num_obs=1)
+                
+                rewards = {
+                    agent: observed_reward[i]
+                    # or stepwise_marl_reward | consumption_per_capita
+                    for i, agent in enumerate(self.agents)
+                }
          
         return rewards
 
@@ -162,9 +239,21 @@ class JusticeEnvironment(ParallelEnv):
             dtype=np.float32
         )
         
+        local_obs = self.cluster_observations(
+            np.array(
+                [
+                    data[key][:, self.timestep, :].mean(axis=1)
+                    for key in self.LOCAL_OBSERVATIONS
+                ],
+                dtype=np.float32,
+            ),
+            num_obs = len(self.LOCAL_OBSERVATIONS)
+        )
+        
         state = np.concatenate((
             global_obs,
-            self.emissions_control_rate[:, self.timestep].astype(np.float32)
+            local_obs.flatten(),
+            self.agent_emissions_control_rate[:, self.timestep].astype(np.float32)
         ))
         
         return state
@@ -192,61 +281,22 @@ class JusticeEnvironment(ParallelEnv):
                 high=np.inf,
                 shape=(
                     len(self.GLOBAL_OBSERVATIONS)
+                    + len(self.LOCAL_OBSERVATIONS) * len(self.possible_agents)
                     + len(self.possible_agents), # emissions control rates
                 ),
                 dtype=np.float32,
             )
         
-    def render(self, filename='agents_emissions_control_rate.png'):
-        if self.emissions_control_rate is None:
-            print("No data to render yet.")
-            return
+    def render(self):
+        print("Rendering JUSTICE Environment...")
         
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 15))
-        years = range(self.start_year, self.start_year + self.emissions_control_rate.shape[1])
-        
-        # Plot emissions control rate
-        for i, agent in enumerate(self.possible_agents):
-            ax1.plot(years, self.emissions_control_rate[i, :], label=agent)
-        
-        ax1.set_xlabel('Year')
-        ax1.set_ylabel('Emissions Control Rate')
-        ax1.set_title('Emissions Control Rate per Agent')
-        ax1.legend()
-        ax1.grid(True)
-        
-        # Plot global temperature
+        print(
+            f"Timestep: {self.timestep}, Year: {self.start_year + self.timestep}"
+        )
         data = self.model.stepwise_evaluate(timestep=self.timestep)
-        global_temp = data['global_temperature'][0:self.num_years, :]
-        
-        # If global_temp is 2D (timesteps x ensembles), take mean across ensembles
-        if global_temp.ndim > 1:
-            global_temp = global_temp.mean(axis=1)
-        
-        # Create years array matching global_temp length
-        temp_years = range(self.start_year, self.start_year + len(global_temp))
-        
-        ax2.plot(temp_years, global_temp, label='Global Temperature')
-        ax2.set_xlabel('Year')
-        ax2.set_ylabel('Global Temperature (°C)')
-        ax2.set_title('Global Temperature Over Time')
-        ax2.legend()
-        ax2.grid(True)
-        
-        # Plot net economic output per agent
-        net_econ_output = data['net_economic_output'][:, 0:self.num_years, :]
-        for i, agent in enumerate(self.possible_agents):
-            agent_output = net_econ_output[i, :, :].mean(axis=1)
-            ax3.plot(temp_years, agent_output, label=agent)
-        
-        ax3.set_xlabel('Year')
-        ax3.set_ylabel('Net Economic Output')
-        ax3.set_title('Net Economic Output per Agent')
-        ax3.legend()
-        ax3.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(filename)
-        plt.title(f'Justice Environment Results - For {self.reward} Reward')
-        plt.close()
-        print(f"Render saved to: {filename}\n")
+        for i, agent in enumerate(self.agents):
+            print(
+                f"Agent: {agent}, Emissions Control Rate: {self.agent_emissions_control_rate[i, self.timestep]:.2f}, "
+                f"Regional Temperature: {data['regional_temperature'][:, self.timestep, :].mean(axis=1)[self.model.cluster_to_country[i]].mean():.2f}, "
+                f"Net Economic Output: {data['net_economic_output'][:, self.timestep, :].mean(axis=1)[self.model.cluster_to_country[i]].mean():.2f}"
+            )
