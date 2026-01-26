@@ -17,9 +17,11 @@ module load python
 # Activate virtual environment and set Python path
 source venv/bin/activate
 
-export WANDB_API_KEY=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
-
-srun wandb login
+# export WANDB_API_KEY=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
+export WANDB_MODE=offline
 
 # Run training script from JUSTICE root
-srun  python ./thesis_rl/train.py --env harl_justice --algo mappo > run.log
+# reward can be: 'stepwise_marl_reward', 'consumption_per_capita', 'regional_temperature', 'global_temperature'
+srun  python ./thesis_rl/train.py --env harl_justice --algo happo > run2.log
+
+# srun wandb sync /scratch/aandrasz/JUSTICE/wandb/offline-*
