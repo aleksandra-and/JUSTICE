@@ -176,12 +176,12 @@ class JusticeEnvironment(ParallelEnv):
                 observed_reward = data[self.reward][:, self.timestep, :].mean(axis=1)
                 
                 rewards = {
-                    agent: 1.0 / observed_reward[self.model.cluster_to_country[i]].mean()
+                    agent: - observed_reward[self.model.cluster_to_country[i]].mean()
                     for i, agent in enumerate(self.agents)
                 }
             case 'global_temperature':
                 rewards = {
-                    agent: 1.0 / data[self.reward][self.timestep, :].mean()
+                    agent: - data[self.reward][self.timestep, :].mean()
                     for i, agent in enumerate(self.agents)
                 }
             case 'stepwise_marl_reward':

@@ -21,6 +21,7 @@ class EnvArgs:
     ensables: list
     env_name: str
     action_change: int = 2 # How much agent action can change per step (if 2 -> action can change by +/- 0.2)
+    state_type: str = 'FP'  # 'Function Pruned'
     
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 
