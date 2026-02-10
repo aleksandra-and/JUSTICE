@@ -14,7 +14,7 @@ def main():
     sweep_configuration = {
         "method": "bayes",
         "name": f"sweep-bayes-{time.time():.0f}",
-        "metric": {"goal": "maximize", "name": "aver_episode_rewards"},
+        "metric": {"goal": "maximize", "name": "average_step_rewards"},
         "parameters": { 
             # "model" args
                 #"lr": {"distribution": "log_uniform", "min": 1e-5, "max": 1e-3},
@@ -42,7 +42,7 @@ def main():
         
         print(f"Tracking experiment with wandb")
         
-        args['exp_name'] = f"{args['algo']}_{args['env']}_{time.time():.0f}"
+        # args['exp_name'] = f"{args['algo']}_{env_args['num_agents']}_agents_{time.time():.0f}"
         
         # Start a new wandb run to track this script.
         wandb.init(

@@ -20,8 +20,9 @@ class EnvArgs:
     num_agents: int # Number of agents  
     ensables: list
     env_name: str
-    action_change: int = 2 # How much agent action can change per step (if 2 -> action can change by +/- 0.2)
-    state_type: str = 'FP'  # 'Function Pruned'
+    action_change: int = 1 # How much agent action can change per step
+    state_type: str = 'EP'  # 'Environment Provided' or 'Function Pruned'
+    num_actions: int = 21 # Number of discrete actions (e.g. 0.0, 0.05, ..., 1.0 for emissions control rate)
     
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 
