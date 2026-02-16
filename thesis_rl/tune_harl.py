@@ -13,7 +13,7 @@ def main():
     
     sweep_configuration = {
         "method": "bayes",
-        "name": f"sweep-bayes-{time.time():.0f}",
+        "name": f"sweep-bayes-{args['algo']}-{env_args['reward']}",
         "metric": {"goal": "maximize", "name": "average_step_rewards"},
         "parameters": { 
             # "model" args
@@ -26,7 +26,7 @@ def main():
                 "ppo_epochs": {"distribution": "int_uniform", "min": 3, "max": 10},
                 "use_gae": {"distribution": "categorical", "values": [True, False]},
                 "clip_param": {"distribution": "uniform", "min": 0.1, "max": 0.3},
-                "use_clipped_value_los": {"distribution": "categorical", "values": [True, False]},
+                "use_clipped_value_loss": {"distribution": "categorical", "values": [True, False]},
                 "entropy_coef": {"distribution": "log_uniform_values", "min": 0.0001, "max": 0.01},
                 "value_loss_coef": {"distribution": "uniform", "min": 0.1, "max": 1.0},
                 "max_grad_norm": {"distribution": "uniform", "min": 0.3, "max": 1.0},
@@ -42,7 +42,7 @@ def main():
         
         print(f"Tracking experiment with wandb")
         
-        # args['exp_name'] = f"{args['algo']}_{env_args['num_agents']}_agents_{time.time():.0f}"
+        args['exp_name'] = f"{args['algo']}_{env_args['num_agents']}_agents_{time.time():.0f}"
         
         # Start a new wandb run to track this script.
         wandb.init(
@@ -50,7 +50,6 @@ def main():
             entity="olaandrasz-tu-delft",
             # Set the wandb project where this run will be logged.
             project="harl_justice_exp",
-            name=args['exp_name'],
             config={**algo_args['algo'], **env_args},
         )
         
