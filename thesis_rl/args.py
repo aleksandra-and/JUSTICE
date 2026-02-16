@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import argparse
+import json
+from typing import List, Optional
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 
 @dataclass
@@ -23,7 +25,25 @@ class EnvArgs:
     action_change: int = 1 # How much agent action can change per step
     state_type: str = 'EP'  # 'Environment Provided' or 'Function Pruned'
     num_actions: int = 21 # Number of discrete actions (e.g. 0.0, 0.05, ..., 1.0 for emissions control rate)
-    
+    # MOMARL-specific arguments
+    rewards: list = field(default_factory=lambda: ['inverse_global_temperature', 'global_economic_output'])  # List of objectives for MOMARL
+    weights: list = field(default_factory=lambda: [0.5, 0.5])  # Weights for linearizing multi-objective rewards
+    normalize_rewards: bool = True  # Whether to normalize rewards before linearization
+
+
+@dataclass
+class MOMARLArgs:
+    """Arguments specific to Multi-Objective MARL training."""
+    weights_generation: str = "OLS"  # Method to generate weights: 'OLS' or 'uniform'
+    num_weights: int = 10  # Maximum number of weight iterations
+    total_uniform_weights: int = 100  # Total number of uniform weights to generate (for uniform method)
+    start_uniform_weight: int = 0  # Start index for uniform weight generation
+    end_uniform_weight: int = 10  # End index for uniform weight generation
+    ref_point: list = field(default_factory=lambda: [0.0, 0.0])  # Reference point for hypervolume calculation
+    timesteps_per_weight: int = 1000000  # Training timesteps per weight vector
+    save_policies: bool = True  # Whether to save trained policies
+    base_save_path: str = "results/momarl"  # Base path for saving results
+
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 
 def parse_args():
@@ -62,8 +82,9 @@ def parse_args():
             "smacv2",
             "lag",
             "harl_justice",
+            "harl_justice_momarl",
         ],
-        help="Environment name. Choose from: smac, mamujoco, pettingzoo_mpe, gym, football, dexhands, smacv2, lag.",
+        help="Environment name. Choose from: smac, mamujoco, pettingzoo_mpe, gym, football, dexhands, smacv2, lag, harl_justice, harl_justice_momarl.",
     )
     parser.add_argument(
         "--exp_name", type=str, default="installtest", help="Experiment name."
