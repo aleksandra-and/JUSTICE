@@ -35,8 +35,6 @@ def parse_momarl_args():
                         help="Weight generation method: OLS or uniform")
     parser.add_argument("--num_weights", type=int, default=10,
                         help="Maximum number of weight iterations")
-    parser.add_argument("--total_uniform_weights", type=int, default=10,
-                        help="Total number of uniform weights (for uniform method)")
     parser.add_argument("--start_uniform_weight", type=int, default=0,
                         help="Start index for uniform weights")
     parser.add_argument("--end_uniform_weight", type=int, default=10,
@@ -164,21 +162,11 @@ def main():
     print(f"Weights generation: {momarl_args['weights_generation']}")
     print(f"Max weights: {momarl_args['num_weights']}")
     
-    # Initialize wandb for overall experiment tracking
+    # Create experiment group name for wandb
     timestamp = int(time.time())
     exp_name = f"momarl_{args['algo']}_{momarl_args['weights_generation']}_{timestamp}"
+    wandb_group = exp_name  # All runs in this experiment share this group
     args['exp_name'] = exp_name
-    
-    wandb.init(
-        entity="olaandrasz-tu-delft",
-        project="harl_justice_momarl",
-        name=exp_name,
-        config={
-            **algo_args.get('algo', {}),
-            **env_args,
-            **momarl_args,
-        },
-    )
     
     # Setup results storage
     results_path = Path(momarl_args['base_save_path']) / exp_name
@@ -205,7 +193,7 @@ def main():
         
         # For distributed training: generate total_uniform_weights, then slice
         all_weights = morl_baselines.common.weights.equally_spaced_weights(
-            num_objectives, momarl_args['total_uniform_weights']
+            num_objectives, momarl_args['num_weights'],
         )
         all_weights = all_weights[momarl_args['start_uniform_weight']:momarl_args['end_uniform_weight']]
         
@@ -227,7 +215,23 @@ def main():
         print(f"{'='*60}")
         
         # Update experiment name for this weight
+        weight_run_name = f"weight_{weight_idx}_[{weights[0]:.2f},{weights[1]:.2f}]"
         args['exp_name'] = f"{exp_name}_w{weight_idx}"
+        
+        # Start a new wandb run for this weight (grouped with other weights)
+        wandb.init(
+            entity="olaandrasz-tu-delft",
+            project="harl_justice_momarl",
+            group=wandb_group,  # Groups all weight runs together
+            name=weight_run_name,
+            config={
+                "weight_idx": weight_idx,
+                "weights": weights.tolist(),
+                **algo_args.get('algo', {}),
+                **env_args,
+                **momarl_args,
+            },
+        )
         
         # Train policy for current weights
         runner = train_single_weight(args, algo_args, env_args, weights, weight_idx)
@@ -245,19 +249,24 @@ def main():
         eval_results["weights"].append(weights.tolist())
         eval_results["vector_returns"].append(vec_return.tolist())
         
-        # Log to wandb
+        # Log final evaluation to this weight's run
         wandb.log({
-            "weight_idx": weight_idx,
-            "weights": weights.tolist(),
-            "vector_return": vec_return.tolist(),
-            **{f"return_obj_{i}": vec_return[i] for i in range(num_objectives)},
+            "final/vector_return": vec_return.tolist(),
+            **{f"final/return_obj_{i}": vec_return[i] for i in range(num_objectives)},
         })
+        
+        # Log summary metrics for this weight
+        wandb.summary["weight_idx"] = weight_idx
+        wandb.summary["weights"] = weights.tolist()
+        wandb.summary["vector_return"] = vec_return.tolist()
+        for i in range(num_objectives):
+            wandb.summary[f"return_obj_{i}"] = vec_return[i]
         
         # Save intermediate results
         with open(results_path / "eval_results.json", "w") as f:
             json.dump(eval_results, f, indent=2)
         
-        # Close runner before next iteration
+        # Close runner and finish this weight's wandb run
         runner.close()
         wandb.finish()
         
@@ -287,6 +296,44 @@ def main():
         print(f"\nPareto front approximation:")
         for i, (w, vr) in enumerate(zip(eval_results["weights"], eval_results["vector_returns"])):
             print(f"  Policy {i}: weights={w}, return={vr}")
+        
+        # Create a summary wandb run for the Pareto front
+        wandb.init(
+            entity="olaandrasz-tu-delft",
+            project="harl_justice_momarl",
+            group=wandb_group,
+            name=f"summary_pareto_front",
+            job_type="summary",
+            config={
+                "num_policies": len(eval_results["weights"]),
+                "objectives": eval_results["objectives"],
+                **momarl_args,
+            },
+        )
+        
+        # Create a table for the Pareto front
+        objectives = eval_results.get("objectives", ["obj_0", "obj_1"])
+        columns = ["policy_idx", "weight_0", "weight_1"] + [f"return_{obj}" for obj in objectives]
+        pareto_table = wandb.Table(columns=columns)
+        
+        for i, (w, vr) in enumerate(zip(eval_results["weights"], eval_results["vector_returns"])):
+            row = [i, w[0], w[1]] + vr
+            pareto_table.add_data(*row)
+        
+        wandb.log({"pareto_front": pareto_table})
+        
+        # Log scatter plot of Pareto front
+        if len(objectives) >= 2:
+            data = [[vr[0], vr[1]] for vr in eval_results["vector_returns"]]
+            table = wandb.Table(data=data, columns=[objectives[0], objectives[1]])
+            wandb.log({
+                "pareto_scatter": wandb.plot.scatter(
+                    table, objectives[0], objectives[1],
+                    title="Pareto Front Approximation"
+                )
+            })
+        
+        wandb.finish()
     
     # Save final results
     with open(results_path / "final_results.json", "w") as f:
