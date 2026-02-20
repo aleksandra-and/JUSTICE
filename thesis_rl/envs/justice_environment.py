@@ -62,7 +62,7 @@ class JusticeEnvironment(ParallelEnv):
             cluster_level=len(self.possible_agents),
             stochastic_run=False,
         )
-        # Getting population from the model with shape: (57, num_years, num_ensebles)
+        # Population shape: (57, num_years, num_ensebles)
         self.population = self.model.economy.get_population()
         self.start_year = 2015
         self.end_year = 2300
@@ -79,6 +79,7 @@ class JusticeEnvironment(ParallelEnv):
         self.agent_emissions_control_rate = np.zeros((len(self.possible_agents), self.num_years))
         self.agent_savings_rate = np.zeros((len(self.possible_agents), self.num_years))
         
+        # Get init observations and action masks
         observations = self.get_observations(self.model.stepwise_evaluate(timestep=self.timestep), None)
         self.action_mask = {agent: self.get_avail_agent_actions(i) for i, agent in enumerate(self.agents)}
         infos = {
@@ -94,23 +95,40 @@ class JusticeEnvironment(ParallelEnv):
 
     def step(self, actions):
         # Get corresponding actions for all agents
-        # actions[agent] is a 2-element array: [emission_control_action, savings_rate_action]
-        self.agent_emissions_control_rate[:, self.timestep] = [
-                actions[agent][0] / (self.num_actions - 1) 
-            for agent in self.agents
-        ]
-        self.agent_savings_rate[:, self.timestep] = [
-                actions[agent][1] / (self.num_actions - 1) 
-            for agent in self.agents
-        ]
+        if self.fixed_savings_rate:
+            # Single action: [emission control]
+            self.agent_emissions_control_rate[:, self.timestep] = [
+                    actions[agent][0] / (self.num_actions - 1) 
+                for agent in self.agents
+            ]
+            # Use endogenous savings rate from model
+            self.model.stepwise_run(
+                emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
+                timestep=self.timestep,
+                endogenous_savings_rate=True
+            )
+            # Store the model's fixed savings rate for observations (clustered average)
+            for i in range(len(self.possible_agents)):
+                self.agent_savings_rate[i, self.timestep] = self.model.savings_rate[
+                    self.model.cluster_to_country[i], self.timestep
+                ].mean()
+        else:
+            # Two actions: [emission_control_action, savings_rate_action]
+            self.agent_emissions_control_rate[:, self.timestep] = [
+                    actions[agent][0] / (self.num_actions - 1) 
+                for agent in self.agents
+            ]
+            self.agent_savings_rate[:, self.timestep] = [
+                    actions[agent][1] / (self.num_actions - 1) 
+                for agent in self.agents
+            ]
+            self.model.stepwise_run(
+                emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
+                timestep=self.timestep,
+                savings_rate=self.agent_savings_rate[:, self.timestep],
+                endogenous_savings_rate=False
+            )
         
-        # Run the model for the current timestep with both emission control and savings rate
-        self.model.stepwise_run(
-            emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
-            timestep=self.timestep,
-            savings_rate=self.agent_savings_rate[:, self.timestep],
-            endogenous_savings_rate=False
-        )
         data = self.model.stepwise_evaluate(timestep=self.timestep)
         
         # Get observations, rewards, done, infos
@@ -143,29 +161,32 @@ class JusticeEnvironment(ParallelEnv):
     
     def get_avail_agent_actions(self, agent_idx):
         """Returns the available actions for agent_id.
-        Returns a flattened array of action masks for MultiDiscrete:
-        [emission_control_mask..., savings_rate_mask...]
+        For fixed_savings_rate=True: returns mask for emission control only.
+        For fixed_savings_rate=False: returns flattened mask [emission_mask..., savings_mask...].
         """
-        action_nvec = self.action_space(agent_idx).nvec  # [num_actions, num_actions]
+        def build_action_mask(last_action, num_actions):
+            """Build action mask allowing actions within action_change of last action."""
+            if self.timestep == 0:
+                return np.ones(num_actions, dtype=np.float32)
+            mask = np.zeros(num_actions, dtype=np.float32)
+            last_idx = int(last_action * (self.num_actions - 1))
+            start = max(0, last_idx - self.action_change)
+            end = min(num_actions, last_idx + self.action_change + 1)
+            mask[start:end] = 1.0
+            return mask
         
-        if self.timestep == 0:
-            # All actions available at first timestep
-            return np.ones(sum(action_nvec), dtype=np.float32)
+        emission_mask = build_action_mask(
+            self.agent_emissions_control_rate[agent_idx, max(0, self.timestep - 1)],
+            self.num_actions
+        )
         
-        # Mask for emission control rate
-        emission_mask = np.zeros(action_nvec[0], dtype=np.float32)
-        last_emission_action = int(self.agent_emissions_control_rate[agent_idx, self.timestep - 1] * (self.num_actions - 1))
-        range_start = max(0, last_emission_action - self.action_change)
-        range_end = min(action_nvec[0], last_emission_action + self.action_change + 1)
-        emission_mask[range_start:range_end] = 1.0
+        if self.fixed_savings_rate:
+            return emission_mask
         
-        # Mask for savings rate (same logic)
-        savings_mask = np.zeros(action_nvec[1], dtype=np.float32)
-        last_savings_action = int(self.agent_savings_rate[agent_idx, self.timestep - 1] * (self.num_actions - 1))
-        range_start = max(0, last_savings_action - self.action_change)
-        range_end = min(action_nvec[1], last_savings_action + self.action_change + 1)
-        savings_mask[range_start:range_end] = 1.0
-        
+        savings_mask = build_action_mask(
+            self.agent_savings_rate[agent_idx, max(0, self.timestep - 1)],
+            self.num_actions
+        )
         return np.concatenate([emission_mask, savings_mask])
         
     def get_observations(self, data, actions):        
@@ -308,7 +329,12 @@ class JusticeEnvironment(ParallelEnv):
     
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        return MultiDiscrete([self.num_actions, self.num_actions])
+        if self.fixed_savings_rate:
+            # Single action: emission control only
+            return Discrete(self.num_actions)
+        else:
+            # Two actions: emission control and savings rate
+            return MultiDiscrete([self.num_actions, self.num_actions])
     
     @functools.lru_cache(maxsize=None)
     def state_space(self):
