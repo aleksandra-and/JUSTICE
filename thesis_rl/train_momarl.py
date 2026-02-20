@@ -110,7 +110,14 @@ def evaluate_policy_vector_rewards(runner, env_args, num_episodes=5):
                 
                 rnn_states[agent] = rnn_state.cpu().numpy() if hasattr(rnn_state, 'cpu') else rnn_state
                 action = action.cpu().numpy() if hasattr(action, 'cpu') else action
-                actions[agent] = int(action.flatten()[0])
+                
+                # Handle single or dual actions
+                if eval_env.fixed_savings_rate:
+                    actions[agent] = int(action.flatten()[0])
+                else:
+                    # For MultiDiscrete: [emission_control, savings_rate]
+                    action_flat = action.flatten()
+                    actions[agent] = [int(action_flat[0]), int(action_flat[1])]
             
             obs, rewards, terminated, truncated, infos = eval_env.step(actions)
             
