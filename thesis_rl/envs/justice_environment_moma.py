@@ -37,6 +37,7 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         "consumption_per_capita",      # consumption / population (higher is better)
         "gini_consumption",            # Gini coefficient of consumption (lower is better, we negate)
         "avg_temperature_threshold",   # fraction of ensembles below 2C threshold
+        "welfare",                     # spatially aggregated welfare (higher is better)
     ]
 
     def __init__(self, args=None, render_mode=None):
@@ -269,7 +270,10 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                     # Sum of all regional net economic output, scaled
                     r = data['net_economic_output'][:, self.timestep, :].mean(axis=1).sum() / 1000.0
                     agent_rewards.append(r)
-                    
+                
+                elif obj == 'welfare':
+                    r = data['stepwise_marl_reward'][:, self.timestep].sum()
+                    agent_rewards.append(r)
                 elif obj == 'consumption_per_capita':
                     # Regional consumption per capita for this agent's cluster
                     consumption = data['consumption_per_capita'][:, self.timestep, :].mean(axis=1)

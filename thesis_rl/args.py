@@ -3,6 +3,7 @@ import argparse
 import json
 from typing import List, Optional
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
+import yaml
 
 @dataclass
 class TrainArgs:
@@ -42,7 +43,6 @@ class MOMARLArgs:
     start_uniform_weight: int = 0  # Start index for uniform weight generation
     end_uniform_weight: int = 10  # End index for uniform weight generation
     ref_point: list = field(default_factory=lambda: [0.0, 0.0])  # Reference point for hypervolume calculation
-    timesteps_per_weight: int = 1000000  # Training timesteps per weight vector
     save_policies: bool = True  # Whether to save trained policies
     base_save_path: str = "results/momarl"  # Base path for saving results
 
@@ -92,6 +92,12 @@ def parse_args():
         "--exp_name", type=str, default="installtest", help="Experiment name."
     )
     parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="harl_justice_momarl",
+        help="Wandb project name."
+    )
+    parser.add_argument(
         "--load_config",
         type=str,
         default="",
@@ -116,8 +122,9 @@ def parse_args():
     unparsed_dict = {k: v for k, v in zip(keys, values)}
     args = vars(args)  # convert to dict
     if args["load_config"] != "":  # load config from existing config file
+        print(f"Loading config from {args['load_config']}...")
         with open(args["load_config"], encoding="utf-8") as file:
-            all_config = json.load(file)
+            all_config = yaml.safe_load(file)
         args["algo"] = all_config["main_args"]["algo"]
         args["env"] = all_config["main_args"]["env"]
         algo_args = all_config["algo_args"]

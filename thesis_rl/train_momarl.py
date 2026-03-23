@@ -41,8 +41,6 @@ def parse_momarl_args():
                         help="End index for uniform weights")
     parser.add_argument("--ref_point", type=float, nargs='+', default=[0.0, 0.0],
                         help="Reference point for hypervolume calculation")
-    parser.add_argument("--timesteps_per_weight", type=int, default=1000000,
-                        help="Training timesteps per weight vector")
     parser.add_argument("--save_policies", action="store_true", default=True,
                         help="Whether to save trained policies")
     parser.add_argument("--base_save_path", type=str, default="results/momarl",
@@ -171,7 +169,8 @@ def main():
     
     # Create experiment group name for wandb
     timestamp = int(time.time())
-    exp_name = f"momarl_{args['algo']}_{momarl_args['weights_generation']}_{timestamp}"
+    datenow = time.strftime("%Y%m", time.localtime(timestamp))
+    exp_name = f"momarl_{args['algo']}_{momarl_args['weights_generation']}_{algo_args['train']['num_env_steps']}_{datenow}"
     wandb_group = exp_name  # All runs in this experiment share this group
     args['exp_name'] = exp_name
     
@@ -222,18 +221,19 @@ def main():
         print(f"{'='*60}")
         
         # Update experiment name for this weight
-        weight_run_name = f"weight_{weight_idx}_[{weights[0]:.2f},{weights[1]:.2f}]"
-        args['exp_name'] = f"{exp_name}_w{weight_idx}"
+        weight_run_name = f"{exp_name}_w{momarl_args['start_uniform_weight'] + weight_idx}"
+        args['exp_name'] = weight_run_name
         
         # Start a new wandb run for this weight (grouped with other weights)
         wandb.init(
             entity="olaandrasz-tu-delft",
-            project="harl_justice_momarl",
+            project=args["wandb_project"],
             group=wandb_group,  # Groups all weight runs together
             name=weight_run_name,
             config={
                 "weight_idx": weight_idx,
                 "weights": weights.tolist(),
+                "weight_run_name": weight_run_name,
                 **algo_args.get('algo', {}),
                 **env_args,
                 **momarl_args,
@@ -328,18 +328,6 @@ def main():
             pareto_table.add_data(*row)
         
         wandb.log({"pareto_front": pareto_table})
-        
-        # Log scatter plot of Pareto front
-        if len(objectives) >= 2:
-            data = [[vr[0], vr[1]] for vr in eval_results["vector_returns"]]
-            table = wandb.Table(data=data, columns=[objectives[0], objectives[1]])
-            wandb.log({
-                "pareto_scatter": wandb.plot.scatter(
-                    table, objectives[0], objectives[1],
-                    title="Pareto Front Approximation"
-                )
-            })
-        
         wandb.finish()
     
     # Save final results
