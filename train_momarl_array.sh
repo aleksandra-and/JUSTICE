@@ -28,9 +28,9 @@ END_WEIGHT=$((START_WEIGHT + WEIGHTS_PER_JOB))
 
 echo "Array task $SLURM_ARRAY_TASK_ID: training weights $START_WEIGHT to $((END_WEIGHT - 1))"
 
-srun python thesis_rl/train_momarl.py --algo mappo --env harl_justice_momarl \
+srun python thesis_rl/train_momarl.py --load_config 'thesis_rl/configs/economy_welfare.yaml' \
+    --wandb_project momarl_welfare \
     --weights_generation uniform \
     --num_weights 100 \
     --start_uniform_weight $START_WEIGHT \
-    --end_uniform_weight $END_WEIGHT \
-    --timesteps_per_weight 2508000 > run_momarl_mappo_b${SLURM_ARRAY_TASK_ID}.log
+    --end_uniform_weight $END_WEIGHT > run_momarl_happo_b${SLURM_ARRAY_TASK_ID}.log
