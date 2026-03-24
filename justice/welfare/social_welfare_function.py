@@ -188,6 +188,48 @@ class SocialWelfareFunction:
             welfare,
         )
 
+    def calculate_spatially_disaggregated_welfare(
+        self, consumption_per_capita, **kwargs
+    ):
+        """
+        This method calculates the welfare.
+        """
+        # Use np.maximum instead of np.where to be more efficient
+        consumption_per_capita = np.maximum(consumption_per_capita, SMALL_NUMBER)
+
+        # Aggregate the states dimension
+        states_aggregated_consumption_per_capita = self.states_aggregator(
+            consumption_per_capita,
+            self.climate_ensembles,
+            self.risk_aversion,
+        )
+
+        # Get the discount rate array
+        discount_rate = self.calculate_discount_rate(
+            pure_rate_of_social_time_preference=self.pure_rate_of_social_time_preference,
+            model_time_horizon=self.model_time_horizon,
+            timestep=self.timestep,
+        )
+
+        # TODO: Change that -1 later
+        # Calculate the welfare disaggregated temporally
+        spatially_disaggregated_welfare = np.zeros_like(
+            states_aggregated_consumption_per_capita
+        )
+
+        # If data is 3D, we need to apply the discount rate across the first axis (regions)
+        spatially_disaggregated_welfare = (
+            states_aggregated_consumption_per_capita - 1
+        ) * discount_rate[None, :]
+
+        # Calculate the welfare by summing across the temporal axis
+        spatially_disaggregated_welfare = np.sum(
+            spatially_disaggregated_welfare,
+            axis=1,
+        )
+
+        return spatially_disaggregated_welfare
+
     def calculate_stepwise_welfare(self, consumption_per_capita, timestep):
         """
         This method calculates the welfare.

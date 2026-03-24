@@ -4,13 +4,23 @@
     "data_timestep": 5,
     "timestep": 1,
     "emission_control_start_year": 2025,
-    "n_rbfs": 4,
-    "n_inputs": 2,
+    "n_inputs": 3,
     "epsilons": [
-        0.00001,
-        0.001
+        10,
+        10,
+        10,
+        10,
+        10,
+        0.01
     ],
-    "reference_ssp_rcp_scenario_index": 2,
+
+    "min_temperature": 0.5,
+    "max_temperature": 5.0,
+    "min_temperature_change": -0.5,
+    "max_temperature_change": 2.0,
+    "consumption_min": 20.0,
+    "consumption_max": 3500.0,
+
     "climate_ensemble_members" : [
                 694,
                 398,
@@ -63,6 +73,6 @@
                 542,
                 136
             ],
-    "stochastic_run": 1,
+    "stochastic_run": 0,
     "temperature_year_of_interest": 2100
 }
