@@ -10,9 +10,10 @@ https://en.wikipedia.org/wiki/ISO_3166-1
 
 from collections import defaultdict
 import json
-import pycountry  # TODO Use this to get country names for ISO3 codes
 import pandas as pd
 import numpy as np
+from pathlib import Path
+from typing import Sequence
 
 
 def get_region_mapping(
@@ -113,3 +114,77 @@ def justice_region_aggregator(
         aggregated_data[index, :, :] = np.sum(data[indices, :, :], axis=0)
 
     return aggregated_region_list, aggregated_data
+
+
+def build_macro_region_mapping(
+    region_list: Sequence[str],
+    r5_json_path: Path,
+    rice50_json_path: Path,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    """
+    Build the `region_to_macro` index array and the ordered macro-region names.
+
+    Parameters
+    ----------
+    region_list:
+        Ordered list (or array) of 57 region identifiers corresponding to the
+        rows in `emis_control`.
+    r5_json_path:
+        Path to `R5_regions.json`.
+    rice50_json_path:
+        Path to `rice50_regions_dict.json`.
+
+    Returns
+    -------
+    region_to_macro:
+        Array of shape (57,) mapping each row index to a macro-region index.
+    macro_region_names:
+        Tuple of macro-region names in the same order as the aggregated axis.
+    """
+    with open(r5_json_path) as f:
+        macro_region_def = json.load(f)
+
+    with open(rice50_json_path) as f:
+        region_to_countries = json.load(f)
+
+    # Fast lookup from country code -> macro-region index
+    macro_region_names = tuple(macro_region_def.keys())
+    macro_code_to_index = {
+        code: idx
+        for idx, macro_name in enumerate(macro_region_names)
+        for code in macro_region_def[macro_name]
+    }
+
+    region_to_index = {region: idx for idx, region in enumerate(region_list)}
+    region_to_macro = np.full(len(region_list), -1, dtype=np.intp)
+
+    for region_name, country_codes in region_to_countries.items():
+        region_idx = region_to_index.get(region_name)
+        if region_idx is None:
+            continue  # or raise if this should never happen
+
+        for code in country_codes:
+            macro_idx = macro_code_to_index.get(code)
+            if macro_idx is not None:
+                region_to_macro[region_idx] = macro_idx
+                break
+
+    if (region_to_macro < 0).any():
+        missing = np.where(region_to_macro < 0)[0]
+        raise ValueError(
+            "Some regions lack macro-region assignment: "
+            f"{missing.tolist()} – verify your JSON files."
+        )
+
+    return region_to_macro, macro_region_names
+
+
+def aggregate_by_macro_region(
+    data: np.ndarray,
+    region_to_macro: np.ndarray,
+) -> np.ndarray:
+    aggregated = np.zeros(
+        (region_to_macro.max() + 1,) + data.shape[1:], dtype=data.dtype
+    )
+    np.add.at(aggregated, region_to_macro, data)
+    return aggregated

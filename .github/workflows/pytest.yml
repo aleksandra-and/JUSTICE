@@ -2,34 +2,34 @@ name: JUSTICE Unit Tests
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
-          lfs: true # Enable Git LFS support
+          lfs: true
 
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v2
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.9
+          python-version: "3.10"
 
       - name: Install Poetry
         run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo 'export PATH="$HOME/.local/bin:$PATH"' >> $GITHUB_ENV
+          python -m pip install --upgrade pip
+          python -m pip install "poetry==2.3.2"
+          poetry --version
 
       - name: Install dependencies
         run: |
-          poetry install
+          poetry config virtualenvs.in-project true
+          poetry install --no-interaction --no-ansi
 
       - name: Run Pytest
         env:

@@ -114,6 +114,9 @@ def reevaluated_optimal_policy_variable_extractor(
                     + variable_name
                 )
 
+            # Check if output directory exists, if not create it
+            if not path_to_output.exists():
+                path_to_output.mkdir(parents=True, exist_ok=True)
             # Save it as npy file
             out_path = path_to_output / f"{output_file_name}.npy"
             np.save(out_path, processed_data)
@@ -141,6 +144,8 @@ def reevaluate_optimal_policy(
     max_difference=2.0,
     min_difference=0.0,
     model_hard_reset=False,
+    reference_scenario=None,
+    regret_type=None,
 ):
     """
     Function to generate data for the optimal policy. It runs JUSTICE on the optimal policy and saves the data as a pickle file.
@@ -223,7 +228,20 @@ def reevaluate_optimal_policy(
                     min_difference=min_difference,
                 )
 
-                output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
+                if reference_scenario is not None and regret_type is not None:
+                    print("Saving file as ", output_file_name)
+                    output_file_name = (
+                        output_file_name
+                        + "_ref_"
+                        + reference_scenario
+                        + "_"
+                        + regret_type
+                        + "_idx"
+                        + str(rbf_policy_index)
+                    )
+                else:
+                    print("Saving file as ", output_file_name)
+                    output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
 
                 # Now save in hdf5 format
                 with h5py.File(path_to_output + output_file_name + ".h5", "w") as f:
@@ -261,7 +279,21 @@ def reevaluate_optimal_policy(
                 max_difference=max_difference,
                 min_difference=min_difference,
             )
-            output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
+
+            if reference_scenario is not None and regret_type is not None:
+                print("Saving file as ", output_file_name)
+                output_file_name = (
+                    output_file_name
+                    + "_ref_"
+                    + reference_scenario
+                    + "_"
+                    + regret_type
+                    + "_idx"
+                    + str(rbf_policy_index)
+                )
+            else:
+                print("Saving file as ", output_file_name)
+                output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
 
             # Save as HDF5 file
             with h5py.File(path_to_output + output_file_name + ".h5", "w") as f:
@@ -299,7 +331,20 @@ def reevaluate_optimal_policy(
                 max_difference=max_difference,
                 min_difference=min_difference,
             )
-            output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
+            if reference_scenario is not None and regret_type is not None:
+                print("Saving file as ", output_file_name)
+                output_file_name = (
+                    output_file_name
+                    + "_ref_"
+                    + reference_scenario
+                    + "_"
+                    + regret_type
+                    + "_idx"
+                    + str(rbf_policy_index)
+                )
+            else:
+                print("Saving file as ", output_file_name)
+                output_file_name = output_file_name + "_idx" + str(rbf_policy_index)
 
             # Save as HDF5 file
             with h5py.File(path_to_output + output_file_name + ".h5", "w") as f:
@@ -1398,7 +1443,6 @@ def compute_p90_regret_dataframe(
         raise ValueError(
             "No valid baseline data found in mapping for baseline_scenario and variable_of_interest."
         )
-
     # Sort list by median value
     median_list.sort(key=lambda x: x[1])
 

@@ -20,11 +20,734 @@ import pickle
 from justice.util.data_loader import DataLoader
 from plotly.subplots import make_subplots
 from sklearn.preprocessing import MinMaxScaler
-
 import json
 import pycountry
 import plotly.express as px
 import plotly.graph_objects as go
+import re
+from typing import Dict, List
+from typing import Iterable
+from matplotlib.collections import PatchCollection
+from matplotlib.patches import Polygon
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
+from matplotlib.colors import LinearSegmentedColormap
+
+import plotly.colors as pc
+from matplotlib.patches import PathPatch
+import matplotlib.path as mpath
+
+# =============================================================================
+
+
+def load_regional_uncertainty_shares(
+    base_dir: str,
+    stat: str = "raw",
+    model_type: str = "final",
+    years: Iterable[int] = (2030, 2050, 2070, 2100),
+    FEATURE_ORDER=["Scenario", "Regret", "Welfare", "Optimization", "Sample"],
+) -> pd.DataFrame:
+    base = Path(base_dir) / "regional" / stat.lower()
+    if not base.exists():
+        raise FileNotFoundError(f"Directory not found: {base}")
+
+    kind = "shap_full" if model_type == "final" else "shap_cv"
+    pattern = re.compile(rf"^(?P<region>.+)_(?P<year>\d{{4}})_{kind}\.csv$")
+
+    records = []
+    for csv_path in base.glob("*.csv"):
+        m = pattern.match(csv_path.name)
+        if not m:
+            continue
+
+        region_slug = m.group("region")
+        year = int(m.group("year"))
+        if year not in years:
+            continue
+
+        df = pd.read_csv(csv_path)
+        if not {"Feature", "Importance"}.issubset(df.columns):
+            print(f"[warn] '{csv_path}' missing required columns. Skipping.")
+            continue
+
+        s = df.set_index("Feature")["Importance"]
+        s = s.reindex(FEATURE_ORDER, fill_value=0.0)
+        total = s.sum()
+        if total <= 0:
+            continue
+
+        shares = s / total
+        records.append(
+            {
+                "Region": region_slug,
+                "Year": year,
+                "Normative": float(shares[["Regret", "Welfare", "Optimization"]].sum()),
+                "Deep": float(shares["Scenario"]),
+                "Stochastic": float(shares["Sample"]),
+                "Scenario": float(shares["Scenario"]),
+                "Regret": float(shares["Regret"]),
+                "Welfare": float(shares["Welfare"]),
+                "Optimization": float(shares["Optimization"]),
+                "Sample": float(shares["Sample"]),
+            }
+        )
+
+    shares_df = pd.DataFrame(records)
+    if shares_df.empty:
+        raise ValueError("No valid regional CSVs found. Check paths/stat/model_type.")
+    return shares_df
+
+
+# =============================================================================
+# 2. Ternary background + color mixing
+# =============================================================================
+def mix_color(
+    normative,
+    deep,
+    stochastic,
+    base_colors=np.array(
+        [
+            [1.0, 0.0, 1.0],  # Normative → magenta
+            [1.0, 1.0, 0.0],  # Deep      → yellow
+            [0.0, 1.0, 1.0],  # Stochastic→ cyan
+        ]
+    ),
+    as_hex=True,
+):
+    weights = np.array([normative, deep, stochastic], dtype=float)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError("Normative + Deep + Stochastic must be positive.")
+    weights /= total
+    rgb = np.clip(weights @ base_colors, 0, 1)
+    return mcolors.to_hex(rgb) if as_hex else rgb
+
+
+def quantize_simplex(n, d, s, scale=8):
+    """Snap (n, d, s) onto a discrete ternary lattice with step size 1/scale."""
+    weights = np.array([n, d, s], dtype=float)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError("Normative + Deep + Stochastic must be positive.")
+    weights /= total
+
+    scaled = weights * scale
+    base = np.floor(scaled)
+    remainder = scale - int(base.sum())
+
+    if remainder > 0:
+        frac = scaled - base
+        for idx in np.argsort(-frac):
+            if remainder == 0:
+                break
+            base[idx] += 1
+            remainder -= 1
+    elif remainder < 0:
+        frac = scaled - base
+        for idx in np.argsort(frac):
+            if remainder == 0:
+                break
+            base[idx] -= 1
+            remainder += 1
+
+    snapped = base / scale
+    snapped /= snapped.sum()
+    return snapped
+
+
+def barycentric_to_cartesian(normative, deep, stochastic):
+    x = stochastic + 0.5 * normative
+    y = (np.sqrt(3) / 2.0) * normative
+    return x, y
+
+
+def build_triangular_mesh(scale):
+    bary_coords = []
+    cart_coords = []
+    idx_lookup = {}
+    idx = 0
+    for i in range(scale + 1):
+        for j in range(scale + 1 - i):
+            k = scale - i - j
+            n = i / scale
+            d = j / scale
+            s = k / scale
+            bary_coords.append(np.array([n, d, s]))
+            cart_coords.append(barycentric_to_cartesian(n, d, s))
+            idx_lookup[(i, j)] = idx
+            idx += 1
+
+    triangles = []
+    for i in range(scale):
+        for j in range(scale - i):
+            p0 = idx_lookup[(i, j)]
+            p1 = idx_lookup[(i + 1, j)]
+            p2 = idx_lookup[(i, j + 1)]
+            triangles.append((p0, p1, p2))
+            if i + j < scale - 1:
+                p3 = idx_lookup[(i + 1, j + 1)]
+                triangles.append((p1, p3, p2))
+    return bary_coords, cart_coords, triangles
+
+
+def draw_ternary_background(
+    scale=8,
+    base_colors=np.array(
+        [
+            [1.0, 0.0, 1.0],  # Normative → magenta
+            [1.0, 1.0, 0.0],  # Deep      → yellow
+            [0.0, 1.0, 1.0],  # Stochastic→ cyan
+        ]
+    ),
+    ax=None,
+    annotate=False,
+):
+    bary_coords, cart_coords, triangles = build_triangular_mesh(scale)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6.5, 6))
+    else:
+        fig = ax.figure
+
+    patches = []
+    colors = []
+    for tri in triangles:
+        verts = [cart_coords[idx] for idx in tri]
+        centroid = np.mean([bary_coords[idx] for idx in tri], axis=0)
+        face_color = mix_color(*centroid, base_colors=base_colors, as_hex=False)
+        patches.append(Polygon(verts))
+        colors.append(face_color)
+
+        if annotate:
+            cx, cy = barycentric_to_cartesian(*centroid)
+            ax.text(
+                cx,
+                cy,
+                f"{centroid[0]:.2f}\n{centroid[1]:.2f}\n{centroid[2]:.2f}",
+                ha="center",
+                va="center",
+                fontsize=6,
+                color="black",
+            )
+
+    pcoll = PatchCollection(patches, facecolors=colors, edgecolors="k", linewidths=0.3)
+    ax.add_collection(pcoll)
+
+    boundary = np.array(
+        [
+            barycentric_to_cartesian(0, 0, 1),
+            barycentric_to_cartesian(0, 1, 0),
+            barycentric_to_cartesian(1, 0, 0),
+            barycentric_to_cartesian(0, 0, 1),
+        ]
+    )
+    ax.plot(boundary[:, 0], boundary[:, 1], color="black", linewidth=1.25)
+
+    for i in range(1, scale):
+        t = i / scale
+        p1 = barycentric_to_cartesian(t, 0, 1 - t)
+        p2 = barycentric_to_cartesian(t, 1 - t, 0)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="white", alpha=0.6, linewidth=0.8)
+        p1 = barycentric_to_cartesian(0, t, 1 - t)
+        p2 = barycentric_to_cartesian(1 - t, t, 0)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="white", alpha=0.6, linewidth=0.8)
+        p1 = barycentric_to_cartesian(0, 1 - t, t)
+        p2 = barycentric_to_cartesian(1 - t, 0, t)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="white", alpha=0.6, linewidth=0.8)
+
+    ax.text(
+        0.5, np.sqrt(3) / 2 + 0.04, "Normative", ha="center", va="bottom", fontsize=12
+    )
+    ax.text(-0.04, -0.03, "Deep", ha="right", va="top", fontsize=12)
+    ax.text(1.04, -0.03, "Stochastic", ha="left", va="top", fontsize=12)
+
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, np.sqrt(3) / 2 + 0.08)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return fig, ax
+
+
+def add_regions_to_ternary(
+    ax,
+    df_year: pd.DataFrame,
+    scale: int = 8,
+    quantize: bool = True,
+    annotate: bool = False,
+    marker_size: float = 18,
+    jitter_strength: float = 0.02,
+    random_state: int = 0,
+):
+    rng = np.random.default_rng(random_state) if jitter_strength > 0 else None
+
+    for _, row in df_year.iterrows():
+        n, d, s = row["Normative"], row["Deep"], row["Stochastic"]
+        if quantize:
+            n, d, s = quantize_simplex(n, d, s, scale=scale)
+
+        weights = np.array([n, d, s], dtype=float)
+        if jitter_strength > 0:
+            noise = rng.normal(scale=jitter_strength, size=3)
+            weights = np.clip(weights + noise, 1e-6, None)
+            weights /= weights.sum()
+
+        x, y = barycentric_to_cartesian(*weights)
+        ax.scatter(
+            x,
+            y,
+            s=marker_size,
+            marker="X",
+            color="black",
+            edgecolor="none",
+        )
+
+        if annotate:
+            label = row["Region"].replace("_", " ")
+            ax.text(
+                x, y, label, fontsize=4, ha="left", va="top"
+            )  # ha and va mean horizontalalignment and verticalalignment
+
+
+# =============================================================================
+# 3. Choropleth helpers
+# =============================================================================
+def hex_to_rgb(hex_color: str) -> str:
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgb({r},{g},{b})"
+
+
+def build_choropleth(
+    df_year: pd.DataFrame,
+    region_to_iso_path: str,
+    scale: int = 8,
+    quantize: bool = True,
+    projection_type: str = "equal earth",
+) -> go.Figure:
+    with open(region_to_iso_path, "r", encoding="utf-8") as f:
+        region_to_iso = json.load(f)
+
+    rows = []
+    missing_regions = []
+
+    for _, row in df_year.iterrows():
+        label = row["Region"].replace("_", " ")
+        if label not in region_to_iso:
+            missing_regions.append(label)
+            continue
+
+        n, d, s = row["Normative"], row["Deep"], row["Stochastic"]
+        if quantize:
+            n, d, s = quantize_simplex(n, d, s, scale=scale)
+        color_hex = mix_color(n, d, s, as_hex=True)
+
+        for iso3 in region_to_iso[label]:
+            if iso3 == "ATA":
+                continue  # skip Antarctica
+            rows.append(
+                {
+                    "iso_a3": iso3,
+                    "macro_region": label,
+                    "Normative": n,
+                    "Deep": d,
+                    "Stochastic": s,
+                    "color_hex": color_hex,
+                }
+            )
+
+    if missing_regions:
+        print("[warn] Regions missing in JSON:", ", ".join(missing_regions))
+
+    map_df = pd.DataFrame(rows)
+    if map_df.empty:
+        raise ValueError("No regions found for this year that match the JSON mapping.")
+
+    unique_regions = map_df["macro_region"].unique()
+    region_to_idx = {reg: idx for idx, reg in enumerate(unique_regions)}
+    map_df["region_idx"] = map_df["macro_region"].map(region_to_idx)
+
+    n_regions = len(unique_regions)
+    colorscale = []
+    for region in unique_regions:
+        idx = region_to_idx[region]
+        start = idx / n_regions
+        end = (idx + 1) / n_regions
+        color_rgb = hex_to_rgb(
+            map_df.loc[map_df["macro_region"] == region, "color_hex"].iloc[0]
+        )
+        colorscale.append([start, color_rgb])
+        colorscale.append([end, color_rgb])
+
+    choropleth = go.Choropleth(
+        locations=map_df["iso_a3"],
+        z=map_df["region_idx"],
+        text=map_df["macro_region"],
+        hovertemplate="<b>%{text}</b><extra></extra>",
+        colorscale=colorscale,
+        showscale=False,
+        marker=dict(line=dict(color="rgba(255,255,255,0.7)", width=0.4)),
+    )
+
+    fig = go.Figure(data=choropleth)
+    fig.update_layout(
+        showlegend=False,
+        paper_bgcolor="#f8f8f8",
+        plot_bgcolor="#f8f8f8",
+        margin=dict(l=0, r=0, t=0, b=0),
+        geo=dict(
+            projection=dict(type=projection_type),
+            showframe=False,
+            showcoastlines=False,
+            bgcolor="#f8f8f8",
+            landcolor="#f8f8f8",
+        ),
+    )
+    return fig
+
+
+# =============================================================================
+# 4. Master routine
+# =============================================================================
+def generate_uncertainty_visualizations(
+    base_dir: str,
+    region_mapping_path: str,
+    stat: str = "raw",
+    model_type: str = "final",
+    years: Iterable[int] = (2030, 2050, 2070, 2100),
+    ternary_scale: int = 8,
+    quantize: bool = True,
+    annotate_points: bool = False,
+    marker_size: float = 18,
+    jitter_strength: float = 0.02,
+    random_state: int = 0,
+    output_dir: str = "fig_ternary_choropleth",
+):
+    shares_df = load_regional_uncertainty_shares(
+        base_dir=base_dir,
+        stat=stat,
+        model_type=model_type,
+        years=years,
+    )
+
+    output_base = Path(output_dir)
+    output_base.mkdir(parents=True, exist_ok=True)
+
+    sns.set_theme(style="white")
+
+    results = {}
+    last_map = None
+    for yr in years:
+        df_year = shares_df[shares_df["Year"] == yr]
+        if df_year.empty:
+            print(f"[warn] No data for year {yr}. Skipping.")
+            continue
+
+        fig_tern, ax_tern = draw_ternary_background(scale=ternary_scale)
+        add_regions_to_ternary(
+            ax_tern,
+            df_year,
+            scale=ternary_scale,
+            quantize=quantize,
+            annotate=annotate_points,
+            marker_size=marker_size,
+            jitter_strength=jitter_strength,
+            random_state=random_state,
+        )
+        ax_tern.set_title(f"Regional Uncertainty Composition — {yr}")
+        ternary_path = output_base / f"ternary_{yr}.svg"
+        fig_tern.savefig(ternary_path, dpi=300, bbox_inches="tight")
+        plt.close(fig_tern)
+
+        fig_map = build_choropleth(
+            df_year,
+            region_to_iso_path=region_mapping_path,
+            scale=ternary_scale,
+            quantize=quantize,
+        )
+        svg_map_path = output_base / f"choropleth_{yr}.svg"
+        fig_map.write_image(str(svg_map_path), format="svg", width=800, height=600)
+
+        results[yr] = {"ternary": ternary_path, "choropleth": svg_map_path}
+        last_map = fig_map
+
+    return last_map, results
+
+
+def plot_grouped_stacked_feature_importance_from_csvs(
+    base_dir,
+    scope="global",
+    stat="mean",
+    model_type="final",
+    years=(2030, 2050, 2070, 2100),
+    region=None,
+    output_file=None,
+    normalized=True,
+    figsize=(9, 4),
+    bar_width=1.0,
+    legend_fontsize=9,
+    feature_colors=None,
+    feature_order=None,
+    group_map: Dict[str, List[str]] = None,
+    group_colors: Dict[str, str] = None,
+    # Default feature order and colors if no grouping is provided
+    FEATURE_ORDER=["Scenario", "Regret", "Welfare", "Optimization", "Sample"],
+    FEATURE_COLORS={
+        "Scenario": "#8da0cb",
+        "Regret": "#b2e2e2",
+        "Welfare": "#66c2a4",
+        "Optimization": "#238b45",
+        "Sample": "#fc8d62",
+    },
+    # Default colors for grouped bars; feel free to tweak
+    GROUP_COLORS={
+        "Deep Uncertainty": "#8da0cb",
+        "Normative Uncertainty": "#238b45",
+        "Stochastic Uncertainty": "#fc8d62",
+    },
+):
+    """
+    Builds a stacked bar chart with one bar per year from saved SHAP CSVs.
+    If `group_map` is provided, features are aggregated by group and the legend
+    shows entries like "Deep Uncertainty (Scenario)".
+    """
+    # Ensure years are integers and not floats
+    years = [int(yr) for yr in years]
+
+    year_order = list(years)
+    feature_order = feature_order if feature_order is not None else FEATURE_ORDER
+    feature_colors = feature_colors if feature_colors is not None else FEATURE_COLORS
+
+    kind = "shap_full" if model_type == "final" else "shap_cv"
+    root = Path(base_dir) / scope.lower() / stat.lower()
+    if not root.exists():
+        raise FileNotFoundError(f"Directory not found: {root}")
+
+    def read_importance_csv(path: Path):
+        if not path.exists():
+            return None
+        df = pd.read_csv(path)
+        if not {"Feature", "Importance"}.issubset(df.columns):
+            raise ValueError(f"{path} must contain 'Feature' and 'Importance' columns")
+        s = df.set_index("Feature")["Importance"]
+        return s.reindex(feature_order, fill_value=0.0)
+
+    sns.set_theme(style="white")
+
+    if group_map:
+        group_order = list(group_map.keys())
+        label_map = {
+            group: f"{group} ({', '.join(group_map[group])})" for group in group_order
+        }
+        group_colors = group_colors if group_colors is not None else GROUP_COLORS
+
+        def aggregate_by_group(df_row):
+            row = {"Year": df_row["Year"]}
+            for group, feats in group_map.items():
+                missing = [f for f in feats if f not in df_row.index]
+                if missing:
+                    raise KeyError(
+                        f"Missing features {missing} required for group '{group}'"
+                    )
+                row[group] = df_row[list(feats)].sum()
+            return row
+
+        def transform_df(df_plot):
+            records = [aggregate_by_group(row) for _, row in df_plot.iterrows()]
+            return (
+                pd.DataFrame(records),
+                group_order,
+                group_colors,
+                label_map,
+                group_map,
+            )
+
+    else:
+
+        def transform_df(df_plot):
+            return df_plot, feature_order, feature_colors, None, None
+
+    def plot_df(raw_df, title=None, outfile=None):
+        df_plot = raw_df.copy()
+        df_plot["Year"] = pd.Categorical(
+            df_plot["Year"], categories=year_order, ordered=True
+        )
+        df_plot = df_plot.sort_values("Year")
+
+        df_stack, stack_order, colors_map, legend_labels, legend_features = (
+            transform_df(df_plot)
+        )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        x_pos = np.arange(len(df_stack))
+        bottoms = np.zeros(len(df_stack))
+
+        for key in stack_order:
+            values = df_stack[key].to_numpy()
+            ax.bar(
+                x_pos,
+                values,
+                width=bar_width,
+                bottom=bottoms,
+                color=colors_map.get(key, "#999999"),
+                label=legend_labels[key] if legend_labels else key,
+                align="center",
+            )
+            bottoms += values
+
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([str(y) for y in df_stack["Year"]])
+        ax.set_xlim(-0.5, len(df_stack) - 0.5)
+        ax.margins(x=0)
+        sns.despine(ax=ax, top=True, right=True, left=False, bottom=False)
+        ax.set_xlabel("")
+        ax.set_ylabel("Importance" + (" (normalized)" if normalized else ""))
+        if title:
+            ax.set_title(title)
+
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles))
+        ordered_handles = [unique[lbl] for lbl in labels if lbl in unique]
+        ax.legend(
+            ordered_handles,
+            [lbl for lbl in labels if lbl in unique],
+            frameon=False,
+            fontsize=legend_fontsize,
+            ncol=1,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+        )
+
+        if outfile:
+            print(f"[info] Saving figure to {outfile}")
+            Path(outfile).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(outfile, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+        else:
+            plt.show()
+
+        return fig
+
+    if scope.lower() == "global":
+        rows = []
+        for yr in year_order:
+            fpath = root / f"global_{yr}_{kind}.csv"
+            s = read_importance_csv(fpath)
+            if s is None:
+                continue
+            rows.append(
+                {"Year": yr, **{feat: float(s[feat]) for feat in feature_order}}
+            )
+
+        if not rows:
+            raise FileNotFoundError(
+                f"No CSVs found for scope=global, stat={stat}, kind={kind} in {root}"
+            )
+
+        df_plot = pd.DataFrame(rows)
+        fig = plot_df(df_plot, outfile=output_file)
+        return {"data": df_plot, "figure": fig}
+
+    pattern = re.compile(rf"^(?P<region>.+)_(?P<year>\d{{4}})_{kind}\.csv$")
+    files = [p for p in root.glob("*.csv") if p.is_file()]
+    region_set = set()
+    for p in files:
+        m = pattern.match(p.name)
+        if not m:
+            continue
+        yy = int(m.group("year"))
+        if yy in years:
+            region_set.add(m.group("region"))
+
+    region_list = [region] if region else sorted(region_set)
+    if not region_list:
+        raise FileNotFoundError(
+            f"No regional CSVs found for stat={stat}, kind={kind} in {root}"
+        )
+
+    figs = {}
+    all_rows = []
+
+    for rgn in region_list:
+        rows = []
+        for yr in year_order:
+            fpath = root / f"{rgn}_{yr}_{kind}.csv"
+            s = read_importance_csv(fpath)
+            if s is None:
+                continue
+            rows.append(
+                {
+                    "Region": rgn,
+                    "Year": yr,
+                    **{feat: float(s[feat]) for feat in feature_order},
+                }
+            )
+        if not rows:
+            continue
+
+        df_plot = pd.DataFrame(rows)
+        title = rgn.replace("_", " ")
+        out = None
+        if output_file:
+            outpath = Path(output_file)
+            out = str(Path(outpath.parent) / f"{outpath.stem}_{rgn}{outpath.suffix}")
+
+        fig = plot_df(df_plot, title=title, outfile=out)
+        figs[rgn] = fig
+        all_rows.append(df_plot)
+
+    df_all = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+    return {"data": df_all, "figure": figs}
+
+
+def render_all_grouped_stacked_charts(
+    base_dir,
+    scope="global",
+    stat="mean",
+    model_type="final",
+    years=(2030, 2050, 2070, 2100),
+    output_dir=None,
+    normalized=True,
+    figsize=(9, 6),
+    legend_fontsize=9,
+    bar_width=1.0,
+    group_map: Dict[str, List[str]] = None,
+):
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    kwargs = dict(
+        base_dir=base_dir,
+        stat=stat,
+        model_type=model_type,
+        years=years,
+        output_file=None if output_dir is None else "",
+        normalized=normalized,
+        figsize=figsize,
+        legend_fontsize=legend_fontsize,
+        bar_width=bar_width,
+        group_map=group_map,
+    )
+    if scope.lower() == "global":
+        outfile = (
+            None
+            if output_dir is None
+            else str(Path(output_dir) / f"global_{stat}_{model_type}_stacked.svg")
+        )
+        kwargs["scope"] = "global"
+        kwargs["output_file"] = outfile
+        return plot_grouped_stacked_feature_importance_from_csvs(**kwargs)
+    else:
+        outfile = (
+            None
+            if output_dir is None
+            else str(Path(output_dir) / f"regional_{stat}_{model_type}_stacked.svg")
+        )
+        kwargs["scope"] = "regional"
+        kwargs["output_file"] = outfile
+        return plot_grouped_stacked_feature_importance_from_csvs(**kwargs)
 
 
 def plot_emission_control_rate(
@@ -794,6 +1517,9 @@ def plot_comparison_with_boxplots(
 
     if saving:
         filename = data_paths[0].split("/")[-1].split(".")[0] + "_" + output_name_suffix
+        # Check if output path exists
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
         # Save the plot
         fig.write_image(f"{output_path}/{filename}.svg")
 
@@ -1616,24 +2342,6 @@ def visualize_tradeoffs(
             ].shape[0]
         print("Adjusted top indices:", top_indices)
 
-        # for file in input_data:
-        #     df_type = concatenated_df[concatenated_df["type"] == file]
-
-        #     top_indices[file] = (
-        #         df_type[objective_of_interest]
-        #         .nsmallest(int(df_type.shape[0] * top_percentage))
-        #         .index
-        #     )
-        # print(file, len(top_indices[file]))
-
-        # Now within the top_indices, find the index with lowest years_above_temperature_threshold
-        # if temperature_filter:
-        #     index = df_type.loc[top_indices[file]][
-        #         "years_above_temperature_threshold"
-        #     ].idxmin()
-        #     print(index)
-        #     top_indices[file] = [index]
-
     if scaling:
         # Printing min max values of the objectives
         print("Min and Max values of the objectives", list_of_objectives)
@@ -1669,11 +2377,11 @@ def visualize_tradeoffs(
                     # this is one of your highlighted solutions:
                     file_color = color_mapping[_type]
                     # make it thicker
-                    lw = linewidth * 3  # or whatever factor you like
+                    lw = linewidth * highlight_factor  # or whatever factor you like
                     break
 
             # gray lines at half‐opacity, best ones fully opaque
-            alpha_here = 0.2 if file_color == "gray" else 1.0
+            alpha_here = alpha if file_color == "gray" else 1.0
 
         else:
             file_color = color_mapping.get(row["type"], "green")
@@ -1722,7 +2430,6 @@ def visualize_tradeoffs(
             os.makedirs(path_to_output)
         # Save the plot as svg
         plt.savefig(path_to_output + "/" + output_file_name, dpi=300)
-        # plt.savefig(path_to_output + "/" + output_file_name, dpi=300)
 
     # Show the plot
     plt.show()
@@ -2354,6 +3061,8 @@ def plot_choropleth_2D_data(
     normalized_colorbar=False,
     tickvals=[0, 0.25, 0.5, 0.75, 1],
     ticktext=["0%", "25%", "50%", "75%", "100%"],
+    plot_saving_format="svg",
+    show_frame=False,
 ):
 
     # Assert if input_data list and output_titles list is None
@@ -2473,28 +3182,56 @@ def plot_choropleth_2D_data(
                     "x": 0.5,
                     "y": 0.95,
                 },
+                # Remove the frame around the map
+                geo=dict(showframe=False),
             )
+
+            if show_frame:
+                fig.update_layout(
+                    geo=dict(showframe=True, framecolor="black", framewidth=1)
+                )
         else:
-            fig.update_layout(title_text="")
+            fig.update_layout(
+                title_text="",
+                geo=dict(showframe=False),
+            )
+
+            if show_frame:
+                fig.update_layout(
+                    geo=dict(showframe=True, framecolor="black", framewidth=1)
+                )
 
         # Policy index number
         filename = file.split(".")[0]
-        # filename = (
-        #     filename.split("_")[0]
-        #     + filename.split("_")[1]
-        #     + "_"
-        #     + filename.split("_")[-1]
-        # )
+
+        # TODO: This is a hotfix - change this later
+        # filename = filename.split("_")
+        # # Keep index 0 to 5 and the last element and combine them to create the new filename string
+        # filename = "_".join(filename[0:6] + [filename[11]] + [filename[-1]])
+        # print("Saving file: ", filename)
 
         output_file_name = filename
         if saving:
-            fig.write_image(
-                path_to_output
-                + "/"
-                + output_file_name
-                + str(year_to_visualize)
-                + ".svg"
-            )
+            # Check if path to output exists
+            if not os.path.exists(path_to_output):
+                os.makedirs(path_to_output)
+
+            if plot_saving_format == "png":
+                fig.write_image(
+                    path_to_output
+                    + "/"
+                    + output_file_name
+                    + str(year_to_visualize)
+                    + ".png"
+                )
+            else:
+                fig.write_image(
+                    path_to_output
+                    + "/"
+                    + output_file_name
+                    + str(year_to_visualize)
+                    + ".svg"
+                )
 
     return fig, processed_data_dict
 
@@ -3446,9 +4183,6 @@ def plot_stacked_area_chart_with_baseline_emissions(
                 # Concatenate the dataframes abaated_emissions and data but keep the similar region names together
                 data = pd.concat([data, abated_emissions])
 
-                # # Use string similarity to sort the regions
-                # data = data.reindex(sorted(data.index, key=lambda x: x.split("_")[0]))
-
                 # Shape of the data
 
             print("Region list: ", region_list)
@@ -3469,10 +4203,6 @@ def plot_stacked_area_chart_with_baseline_emissions(
                 color_discrete_sequence=colour_palette,
                 groupnorm=groupnorm,
                 category_orders={"variable": region_list},
-                # pattern_shape=data.index,
-                # Pattern Shape sequence for only the abated emissions
-                # pattern_shape_sequence=["x", None, "x", None, "x", None, "x", None, "x", None, "x", None, "x", None, "x", None, "x", None],
-                # pattern_shape_sequence=["x"],
             )
             if groupnorm is None:
                 fig.update_layout(yaxis_range=[yaxis_lower_limit, yaxis_upper_limit])
@@ -4303,77 +5033,285 @@ def plot_regret_heatmap(
     return ax
 
 
-# def plot_hypervolume(
-#     path_to_data="data/convergence_metrics",
-#     path_to_output="./data/plots/convergence_plots",
-#     input_data=[],  # Provide the list of input data files with extension
-#     xaxis_title="Number of Function Evaluations",
-#     yaxis_title="Hypervolume",
-#     linewidth=3,
-#     colour_palette=px.colors.qualitative.Dark24,
-#     template="plotly_white",
-#     yaxis_upper_limit=0.7,
-#     title_x=0.5,
-#     width=1000,
-#     height=800,
-#     fontsize=15,
-#     saving=False,
-# ):
-#     # Assert if input_data list is empty
-#     assert input_data, "No input data provided for visualization."
+def plot_regional_emissions_comparison_with_boxplots(
+    data_paths,  # List of paths for the data
+    start_year,
+    end_year,
+    data_timestep,
+    timestep,
+    visualization_start_year,
+    visualization_end_year,
+    yaxis_range,
+    opacity,
+    plot_title,
+    xaxis_title,
+    yaxis_title,
+    template,
+    width,
+    height,
+    baseline_path=None,
+    colors=[
+        "rgba(252, 141, 98, 0.8)",
+        "rgba(93, 105, 177, 0.8)",
+        "rgba(218, 165, 27, 0.8)",
+        "rgba(47, 138, 196, 0.8)",
+        "rgba(153, 201, 69, 0.8)",
+    ],
+    median_colors=[
+        "rgba(252, 141, 98, 1)",
+        "rgba(93, 105, 177, 1)",
+        "rgba(218, 165, 27, 1)",
+        "rgba(47, 138, 196, 1)",
+        "rgba(153, 201, 69, 1)",
+    ],
+    baseline_color="gray",
+    fontsize=18,
+    column_widths=[0.8, 0.2],
+    output_path=None,
+    saving=False,
+    show_min_max=True,
+    region_dict=None,  # NEW
+    region_name=None,  # NEW
+    region_aggregation=False,  # NEW
+    output_filename=None,
+):
 
-#     # Loop through the input data list and load the data
-#     for idx, file in enumerate(input_data):
-#         data = pd.read_csv(path_to_data + "/" + file)
-#         # Keep only nfe and hypervolume columns
-#         data = data[["nfe", "hypervolume"]]
-#         data = data.sort_values(by="nfe")
+    # Set the time horizon
+    time_horizon = TimeHorizon(
+        start_year=start_year,
+        end_year=end_year,
+        data_timestep=data_timestep,
+        timestep=timestep,
+    )
+    list_of_years = time_horizon.model_time_horizon
 
-#         # Find the max nfe value
-#         nfe_max = data["nfe"].max()
-#         # Get title text from filename
-#         titletext = file.split("_")[0]
-#         # Convert the titletext from all uppercase to title case
-#         titletext = titletext.title()
+    data_loader = DataLoader()
 
-#         fig = go.Figure(
-#             data=[
-#                 go.Scatter(
-#                     x=data["nfe"],
-#                     y=data["hypervolume"],
-#                     fill="none",
-#                     mode="lines",  #'none',
-#                     line=dict(color=colour_palette[idx], width=linewidth),
-#                     showlegend=False,
-#                 )
-#             ]
-#         )
+    # ---------------------------
+    # Baseline (regional optional)
+    # ---------------------------
+    if baseline_path:
+        baseline = np.load(baseline_path)
 
-#         # Set the chart title and axis labels
-#         fig.update_layout(
-#             title=dict(text=titletext),
-#             xaxis_title=xaxis_title,
-#             yaxis_title=yaxis_title,
-#             width=width,
-#             height=height,
-#             template=template,
-#             yaxis_range=[0, yaxis_upper_limit],
-#             title_x=title_x,
-#             font=dict(size=fontsize),
-#         )
+        if region_aggregation:
+            assert (
+                region_dict is not None
+            ), "region_dict required if region_aggregation=True"
+            region_list, baseline = justice_region_aggregator(
+                data_loader=data_loader, region_config=region_dict, data=baseline
+            )
+            # baseline shape: (regions, years, ensemble) or (regions, years)
+            if baseline.ndim == 3:
+                baseline = baseline.mean(axis=2)
 
-#         # Avoid zero tick in the y-axis - minor cosmetic change
-#         fig.update_yaxes(tickvals=(np.arange(0, yaxis_upper_limit, 0.1))[1:])
+            # select one region
+            if region_name is not None:
+                r_idx = region_list.index(region_name)
+                baseline = baseline[r_idx]
 
-#         # Save the figure
-#         if not os.path.exists(path_to_output):
-#             os.makedirs(path_to_output)
+        # --- make sure baseline is 2D (years x ensemble) ---
+        baseline = np.asarray(baseline)
+        if baseline.ndim == 1:
+            baseline = baseline[:, None]  # (years, 1)
+        elif baseline.shape[0] != len(list_of_years) and baseline.shape[1] == len(
+            list_of_years
+        ):
+            baseline = baseline.T
 
-#         if saving:
-#             output_file_name = f"{titletext}_{nfe_max}_hypervolume_plot"
-#             fig.write_image(path_to_output + "/" + output_file_name + ".png")
+        # same as before
+        baseline = pd.DataFrame(baseline.T, columns=list_of_years)
+        baseline = baseline.loc[:, visualization_start_year:visualization_end_year]
+        baseline = baseline.T
+        baseline = baseline.mean(axis=1)
 
-#     return fig
+    # ---------------------------
+    # Load the data and create dataframes
+    # ---------------------------
+    data_frames = []
+    for path in data_paths:
+        filetype = os.path.splitext(path)[1]
+        if filetype == ".npy":
+            data = np.load(path)
+        elif filetype == ".pkl":
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+        elif filetype == ".csv":
+            data = pd.read_csv(path)
+
+        if region_aggregation:
+            assert (
+                region_dict is not None
+            ), "region_dict required if region_aggregation=True"
+            region_list, data = justice_region_aggregator(
+                data_loader=data_loader, region_config=region_dict, data=data
+            )
+
+            # data shape: (regions, years, ensemble)
+            if region_name is not None:
+                r_idx = region_list.index(region_name)
+                data = data[r_idx]
+
+        # original behaviour
+        if len(data.shape) == 3:
+            data = np.sum(data, axis=0)
+
+        data = data.T
+        df = pd.DataFrame(data, columns=list_of_years).loc[
+            :, visualization_start_year:visualization_end_year
+        ]
+        data_frames.append(df.T)
+
+    # ---- rest of your code unchanged ----
+    fig = make_subplots(
+        rows=1, cols=2, column_widths=column_widths, subplot_titles=[plot_title, " "]
+    )
+
+    for idx, emissions in enumerate(data_frames):
+        color = colors[idx]
+        median_color = median_colors[idx]
+
+        max_percentile = np.percentile(emissions, 100, axis=1)
+        min_percentile = np.percentile(emissions, 0, axis=1)
+        p75 = np.percentile(emissions, 75, axis=1)
+        p25 = np.percentile(emissions, 25, axis=1)
+
+        if show_min_max:
+            fig.add_trace(
+                go.Scatter(
+                    x=emissions.index,
+                    y=max_percentile,
+                    mode="lines",
+                    line=dict(color=color, width=0.5),
+                    fill=None,
+                    showlegend=False,
+                ),
+                row=1,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=emissions.index,
+                    y=min_percentile,
+                    mode="lines",
+                    line=dict(color=color, width=0.5),
+                    fill="tonexty",
+                    opacity=opacity * 0.01,
+                    showlegend=False,
+                ),
+                row=1,
+                col=1,
+            )
+
+        fig.add_trace(
+            go.Scatter(
+                x=emissions.index,
+                y=p75,
+                mode="lines",
+                line=dict(color=color, width=0.5),
+                fill=None,
+                showlegend=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=emissions.index,
+                y=p25,
+                mode="lines",
+                line=dict(color=color, width=0.5),
+                fill="tonexty",
+                opacity=opacity,
+                showlegend=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=emissions.index,
+                y=emissions.median(axis=1),
+                mode="lines",
+                line=dict(color=median_color, width=2),
+                name=f"Median {idx+1}",
+            ),
+            row=1,
+            col=1,
+        )
+
+        last_year_data = emissions.iloc[-1]
+        filename = data_paths[idx].split("/")[-1].split(".")[0]
+        filename = filename.split("_")[0]
+        fig.add_trace(
+            go.Box(
+                y=last_year_data,
+                name=filename,
+                marker=dict(color=median_color),
+                width=0.1,
+            ),
+            row=1,
+            col=2,
+        )
+
+    if baseline_path:
+        fig.add_trace(
+            go.Scatter(
+                x=emissions.index,
+                y=baseline,
+                mode="lines",
+                line=dict(color=baseline_color, width=2, dash="dash"),
+                name="Baseline",
+            ),
+            row=1,
+            col=1,
+        )
+
+    fig.update_traces(
+        marker=dict(line=dict(width=0.3, color=baseline_color)), row=1, col=2
+    )
+
+    fig.update_layout(
+        title=plot_title,
+        xaxis_title=xaxis_title,
+        yaxis_title=yaxis_title,
+        template=template,
+        height=height,
+        width=width,
+    )
+
+    fig.update_yaxes(
+        title_text=yaxis_title, range=yaxis_range, showgrid=False, row=1, col=1
+    )
+    fig.update_yaxes(
+        range=yaxis_range, showticklabels=False, showgrid=False, row=1, col=2
+    )
+    fig.update_xaxes(title_text=xaxis_title, showgrid=False, row=1, col=1)
+    fig.update_layout(font=dict(size=fontsize))
+    fig.update_layout(xaxis=dict(domain=[0, 0.8]), xaxis2=dict(domain=[0.95, 1]))
+
+    fig.update_xaxes(
+        showline=True, linewidth=1, linecolor="black", ticks="outside", row=1, col=1
+    )
+    fig.update_yaxes(
+        showline=True, linewidth=1, linecolor="black", ticks="outside", row=1, col=1
+    )
+
+    if saving:
+        if output_filename is None:
+            filename = "_".join(
+                [os.path.splitext(os.path.basename(path))[0] for path in data_paths]
+            )
+            fig.write_image(f"{output_path}/{filename}.svg")
+        else:
+            filename = "_".join(
+                [os.path.splitext(os.path.basename(path))[0] for path in data_paths]
+            )
+            fig.write_image(f"{output_path}/{filename}_{output_filename}.svg")
+
+    return fig
 
 
 if __name__ == "__main__":
@@ -4418,47 +5356,597 @@ if __name__ == "__main__":
         show_title=False,
     )
 
-    ############################################################################################################
-    # fig = plot_timeseries(
-    #     path_to_data="data/reevaluation/only_welfare_temp/",  # "data/reevaluation",  # /balanced,  # "data/reevaluation",
-    #     path_to_output="./data/plots/regional/only_welfare_temp",  # "./data/plots/regional",
-    #     x_label="Years",
-    #     y_label="Temperature Rise (°C)",
-    #     variable_name="global_temperature",
-    #     input_data=[
-    #         "UTILITARIAN_reference_set_idx16.pkl",
-    #         "PRIORITARIAN_reference_set_idx196.pkl",
-    #         # "UTILITARIAN_reference_set_idx51.pkl",
-    #         # "UTILITARIAN_reference_set_idx51_idx62.pkl",
-    #         # "PRIORITARIAN_reference_set_idx817.pkl",
-    #         # "PRIORITARIAN_reference_set_idx817_idx59.pkl",
-    #         # "UTILITARIAN_reference_set_idx88.pkl",
-    #         # "PRIORITARIAN_reference_set_idx748.pkl",
-    #         # "SUFFICIENTARIAN_reference_set_idx99.pkl",
-    #         # "EGALITARIAN_reference_set_idx147.pkl",
-    #     ],
-    #     output_titles=[
-    #         "Utilitarian",
-    #         "Prioritarian",
-    #         # "Sufficientarian",
-    #         # "Egalitarian",
-    #     ],
-    #     main_title="Global Temperature Rise - ",
-    #     show_title=False,
-    #     saving=True,
-    #     yaxis_lower_limit=0,
-    #     yaxis_upper_limit=6,
-    #     alpha=0.1,
-    #     linewidth=2.5,
-    #     start_year=2015,
-    #     end_year=2300,
-    #     visualization_start_year=2025,
-    #     visualization_end_year=2100,
-    #     scenario_list=[
-    #         "SSP119",
-    #         "SSP245",
-    #         "SSP370",
-    #         "SSP434",
-    #         "SSP585",
-    #     ],  # ['SSP119', 'SSP126', 'SSP245', 'SSP370', 'SSP434', 'SSP460', 'SSP534', 'SSP585'], # #
-    # )
+
+def visualize_tradeoffs_colored(
+    input_data=[],
+    figsize=(15, 10),
+    set_style="whitegrid",
+    font_scale=1.8,
+    colourmap="bright",
+    linewidth=0.4,
+    alpha=0.1,
+    path_to_data="data/reevaluation/",
+    path_to_output="./data/plots/only_welfare_temp",
+    scaling=True,
+    feature_range=(0, 1),
+    column_labels=None,
+    legend_labels=None,
+    show_legend=False,
+    axis_rotation=30,
+    fontsize=12,
+    list_of_objectives=[
+        "welfare_utilitarian",
+        "years_above_temperature_threshold",
+        "damage_cost_per_capita_utilitarian",
+        "abatement_cost_per_capita_utilitarian",
+    ],
+    direction_of_optimization=[
+        "min",
+        "min",
+        "max",
+        "max",
+    ],
+    pretty_labels=[
+        "Welfare",
+        "Years Above Temp Threshold",
+        "Welfare Loss Damage",
+        "Welfare Loss Abatement",
+    ],
+    default_colors=["red", "blue"],
+    top_percentage=0.1,
+    objective_of_interest="fraction_above_threshold",
+    show_best_solutions=False,
+    highlight_indices=None,
+    highlight_factor=3,
+    saving=False,
+    custom_colors=["#d62728", "#ff7f0e", "#a8d2e8", "#05417d"],
+):
+
+    sns.set_theme(font_scale=font_scale)
+    sns.set_style(set_style)
+    sns.set_theme(rc={"figure.figsize": figsize})
+
+    # Assertions
+    assert input_data, "Input data not provided"
+    assert path_to_data, "Path to reference set is not provided"
+    assert len(list_of_objectives) == len(direction_of_optimization)
+
+    concatenated_df = pd.DataFrame()
+
+    for file in input_data:
+        data = pd.read_csv(path_to_data + "/" + file)
+        data = data[list_of_objectives]
+        data = np.abs(data)
+        data["type"] = file
+        concatenated_df = pd.concat([concatenated_df, data], axis=0)
+
+    concatenated_df.reset_index(drop=True, inplace=True)
+
+    if scaling:
+        scaler = MinMaxScaler(feature_range=feature_range)
+        concatenated_df[list_of_objectives] = scaler.fit_transform(
+            concatenated_df[list_of_objectives]
+        )
+
+        for i, direction in enumerate(direction_of_optimization):
+            if direction == "min":
+                concatenated_df[list_of_objectives[i]] = (
+                    1 - concatenated_df[list_of_objectives[i]]
+                )
+
+    # --- Custom colormap (red → orange → light blue → blue) ---
+    cmap = LinearSegmentedColormap.from_list("temp_scale", custom_colors)
+    norm = mcolors.Normalize(
+        vmin=concatenated_df[objective_of_interest].min(),
+        vmax=concatenated_df[objective_of_interest].max(),
+    )
+
+    limits = parcoords.get_limits(concatenated_df[list_of_objectives])
+    limits.columns = pretty_labels
+    axes = parcoords.ParallelAxes(limits, rot=axis_rotation, fontsize=fontsize)
+
+    # Adjust highlight indices if needed
+    top_indices = {}
+    if show_best_solutions and highlight_indices:
+        top_indices = highlight_indices.copy()
+        size_offset = 0
+        for file in input_data:
+            if file in top_indices:
+                top_indices[file] = [i + size_offset for i in top_indices[file]]
+            size_offset += concatenated_df[concatenated_df["type"] == file].shape[0]
+
+    for idx, row in concatenated_df.iterrows():
+        file_color = cmap(norm(row[objective_of_interest]))
+        lw = linewidth
+        alpha_here = alpha
+
+        if show_best_solutions and highlight_indices:
+            for _type, indices in top_indices.items():
+                if idx in indices:
+                    lw = linewidth * highlight_factor
+                    alpha_here = 1.0
+                    break
+
+        _sliced_data = pd.DataFrame(row[list_of_objectives].values).T
+        _sliced_data.columns = pretty_labels
+
+        axes.plot(
+            _sliced_data,
+            color=file_color,
+            linewidth=lw,
+            alpha=alpha_here,
+        )
+
+    if saving:
+        output_file_name = (
+            "tradeoffs_"
+            + "_".join([file.split("_")[0] for file in input_data])
+            + "_"
+            + ".svg"
+        )
+        if not os.path.exists(path_to_output):
+            os.makedirs(path_to_output)
+        plt.savefig(path_to_output + "/" + output_file_name, dpi=300)
+
+    plt.show()
+    return concatenated_df
+
+
+def _interp_hex_colors(colors, t):
+    """
+    Interpolate along a list of HEX colors at position t in [0, 1].
+    Returns a Plotly-compatible 'rgb(r,g,b)' string.
+    """
+    t = float(np.clip(t, 0.0, 1.0))
+    n = len(colors)
+    if n == 1:
+        r, g, b = pc.hex_to_rgb(colors[0])
+        return f"rgb({r},{g},{b})"
+
+    pos = t * (n - 1)
+    i = int(np.floor(pos))
+    j = min(i + 1, n - 1)
+    w = pos - i
+
+    c0 = np.array(pc.hex_to_rgb(colors[i]), dtype=float)
+    c1 = np.array(pc.hex_to_rgb(colors[j]), dtype=float)
+    c = (1.0 - w) * c0 + w * c1
+    r, g, b = np.round(c).astype(int)
+    return f"rgb({r},{g},{b})"
+
+
+
+
+
+def plot_alluvial_plotly(
+    df,
+    objectives,
+    direction_of_optimization,
+    temperature_col="fraction_above_threshold",
+    bins=5,  # int or dict like {"welfare_3": 3, "welfare_4": 3}
+    custom_colors=("#d62728", "#ff7f0e", "#9ecae1", "#08519c"),
+    title="Alluvial Trade‑offs (binned)",
+    bin_order="desc",  # "desc": 0.8-1.0 at top (encouraged), "asc": 0.0-0.2 at top
+    drop_unused_bins=True,  # removes empty middle bins per objective (recommended)
+):
+    """
+    Plot an alluvial/Sankey of binned objectives (Plotly).
+
+    - Scales objectives to [0,1] and inverts those with direction "min" so 1=best.
+    - Bins each objective into uniform bins. `bins` can be:
+        * int: same number of bins for all objectives
+        * dict: per-objective bins, e.g. {"welfare_3": 3, "welfare_4": 3}
+    - Colors links by mean scaled temp score of policies in that flow.
+    """
+
+    df = df.copy()
+
+    # Ensure objectives and temperature are numeric BEFORE scaling
+    cols_to_numeric = list(dict.fromkeys(objectives + [temperature_col]))
+    for c in cols_to_numeric:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=cols_to_numeric)
+    if df.empty:
+        raise ValueError(
+            "After coercing to numeric and dropping NaNs, the dataframe is empty."
+        )
+
+    # ---- scale objectives to 0..1 ----
+    scaler = MinMaxScaler()
+    df_scaled = df.copy()
+    df_scaled[objectives] = scaler.fit_transform(df_scaled[objectives])
+
+    # invert "min" objectives so that 1=best, 0=worst
+    for obj, direction in zip(objectives, direction_of_optimization):
+        if direction == "min":
+            df_scaled[obj] = 1.0 - df_scaled[obj]
+
+    # numeric temperature score for coloring
+    if temperature_col in objectives:
+        temp_score = df_scaled[temperature_col].astype(float).values
+    else:
+        tmp = df_scaled[[temperature_col]].copy()
+        tmp[temperature_col] = MinMaxScaler().fit_transform(tmp[[temperature_col]])
+        temp_score = tmp[temperature_col].astype(float).values
+    df_scaled["_temp_score"] = temp_score
+
+    if bin_order not in ("asc", "desc"):
+        raise ValueError("bin_order must be 'asc' or 'desc'")
+
+    # Helper to get bin count per objective
+    def _bins_for(obj):
+        if isinstance(bins, dict):
+            return int(bins.get(obj, 5))
+        return int(bins)
+
+    # ---- bin each objective into categories (possibly with different bin counts) ----
+    for obj in objectives:
+        k = _bins_for(obj)
+        edges = np.linspace(0.0, 1.0, k + 1)
+        labels = [f"{edges[i]:.1f}-{edges[i+1]:.1f}" for i in range(k)]
+
+        df_scaled[obj] = pd.cut(
+            df_scaled[obj],
+            bins=edges,
+            labels=labels,
+            include_lowest=True,
+        )
+
+        ordered_labels = labels if bin_order == "asc" else list(reversed(labels))
+        df_scaled[obj] = df_scaled[obj].cat.reorder_categories(
+            ordered_labels, ordered=True
+        )
+
+        if drop_unused_bins:
+            df_scaled[obj] = df_scaled[obj].cat.remove_unused_categories()
+
+    df_scaled = df_scaled.dropna(subset=objectives + ["_temp_score"])
+    if df_scaled.empty:
+        raise ValueError("After binning, the dataframe is empty (check scaling/bins).")
+
+    # ---- build nodes (use categories ACTUALLY PRESENT, in their ordered order) ----
+    node_labels = []
+    node_index = {}
+    for obj in objectives:
+        for lab in list(df_scaled[obj].cat.categories):
+            node_index[(obj, lab)] = len(node_labels)
+            node_labels.append(f"{obj}\n{lab}")
+
+    # ---- build links (aggregate counts + mean temp_score) ----
+    source, target, value, link_colors = [], [], [], []
+
+    for i in range(len(objectives) - 1):
+        left = objectives[i]
+        right = objectives[i + 1]
+
+        grouped = (
+            df_scaled.groupby([left, right], observed=True)["_temp_score"]
+            .agg(count="size", mean="mean")
+            .reset_index()
+        )
+
+        for _, row in grouped.iterrows():
+            s = node_index[(left, row[left])]
+            t = node_index[(right, row[right])]
+            source.append(s)
+            target.append(t)
+            value.append(int(row["count"]))
+
+            mean_val = float(np.clip(row["mean"], 0.0, 1.0))
+            link_colors.append(_interp_hex_colors(list(custom_colors), mean_val))
+
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="perpendicular",  # keep auto layout (less jumbled) #snap
+                node=dict(
+                    pad=15,
+                    thickness=15,
+                    label=None,  # node_labels,
+                    color="lightgray",
+                ),
+                link=dict(
+                    source=source,
+                    target=target,
+                    value=value,
+                    color=link_colors,
+                ),
+            )
+        ]
+    )
+
+    fig.update_layout(title=title, font_size=10)
+    return fig
+
+
+def scale_and_orient_objectives(
+    df: pd.DataFrame,
+    objectives,
+    direction_of_optimization,
+    feature_range=(0, 1),
+    take_abs=True,
+):
+    assert len(objectives) == len(direction_of_optimization)
+
+    out = df.copy()
+
+    missing = [c for c in objectives if c not in out.columns]
+    if missing:
+        raise KeyError(f"Missing objective columns in df: {missing}")
+
+    for c in objectives:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    out = out.dropna(subset=objectives)
+    if out.empty:
+        raise ValueError(
+            "No rows left after converting objectives to numeric and dropping NaNs."
+        )
+
+    if take_abs:
+        out[objectives] = out[objectives].abs()
+
+    scaler = MinMaxScaler(feature_range=feature_range)
+    out[objectives] = scaler.fit_transform(out[objectives])
+
+    for obj, direction in zip(objectives, direction_of_optimization):
+        if direction == "min":
+            out[obj] = 1.0 - out[obj]
+
+    return out
+
+
+
+
+def curved_parallel_coordinates_clustered(
+    df: pd.DataFrame,
+    objectives,
+    direction_of_optimization,
+    color_by,
+    columns_to_plot=None,  # if None -> plot objectives; you can hide temperature axis here
+    labels=None,
+    bins=3,  # int OR dict, e.g. {"welfare_3": 2, "welfare_4": 2, "default": 3}
+    jitter=0.0,  # small jitter around bin centers (e.g. 0.01–0.03) or 0.0
+    feature_range=(0, 1),
+    take_abs=False,
+    figsize=(12, 8),
+    alpha=0.25,
+    linewidth=1.0,
+    curvature=0.35,
+    highlight_indices=None,  # ORIGINAL row indices from your CSV (e.g. [9,52,86])
+    highlight_factor=3.5,
+    highlight_alpha=1.0,
+    custom_colors=("#d62728", "#ff7f0e", "#9ecae1", "#08519c"),
+    x_rotation=25,
+    title=None,
+    random_state=0,
+):
+    """
+    Same as before, but `bins` can now be:
+      - int: same bins for all plotted axes
+      - dict: per-axis bins with optional default, e.g.
+          bins={"welfare_0": 4, "welfare_3": 2, "welfare_4": 2, "default": 3}
+
+    Each axis is binned on [0,1] into uniform-width bins, values snapped to bin centers.
+    """
+
+    if columns_to_plot is None:
+        columns_to_plot = list(objectives)
+
+    if labels is None:
+        labels = list(columns_to_plot)
+
+    if len(labels) != len(columns_to_plot):
+        raise ValueError("labels must have the same length as columns_to_plot")
+
+    if len(objectives) != len(direction_of_optimization):
+        raise ValueError(
+            "objectives and direction_of_optimization must have the same length"
+        )
+
+    def _bins_for(colname: str) -> int:
+        if isinstance(bins, dict):
+            b = bins.get(colname, bins.get("default", 3))
+            return int(b)
+        return int(bins)
+
+    df0 = df.copy()
+    df0["_orig_index"] = df0.index  # preserve original row index for highlighting
+
+    # Ensure numeric for required cols
+    required_cols = list(dict.fromkeys(list(objectives) + [color_by]))
+    for c in required_cols:
+        if c not in df0.columns:
+            raise KeyError(f"Missing column in df: {c}")
+        df0[c] = pd.to_numeric(df0[c], errors="coerce")
+
+    # Drop rows with NaNs in required cols
+    df0 = df0.dropna(subset=required_cols)
+    if df0.empty:
+        raise ValueError("No rows left after numeric coercion and dropping NaNs.")
+
+    # Optional abs
+    if take_abs:
+        df0[objectives] = df0[objectives].abs()
+
+    # Scale objectives to feature_range
+    scaler = MinMaxScaler(feature_range=feature_range)
+    df_scaled = df0.copy()
+    df_scaled[objectives] = scaler.fit_transform(df_scaled[objectives])
+
+    # Invert "min" objectives so 1=best
+    for obj, direction in zip(objectives, direction_of_optimization):
+        if direction == "min":
+            df_scaled[obj] = 1.0 - df_scaled[obj]
+
+    # Ensure color_by is in [0,1] if it's not among objectives
+    if color_by not in objectives:
+        tmp_scaler = MinMaxScaler(feature_range=feature_range)
+        df_scaled[color_by] = tmp_scaler.fit_transform(df_scaled[[color_by]])
+
+    # -----------------------
+    # Cluster/bin axes to plot (PER AXIS)
+    # -----------------------
+    rng = np.random.default_rng(random_state)
+    df_clustered = df_scaled.copy()
+    clustered_cols = []
+
+    for col in columns_to_plot:
+        if col not in df_clustered.columns:
+            raise KeyError(f"columns_to_plot contains '{col}' which is not in df")
+
+        b = _bins_for(col)
+        if b < 2:
+            raise ValueError(f"bins for '{col}' must be >= 2 (got {b}).")
+
+        edges = np.linspace(0.0, 1.0, b + 1)
+        centers = (edges[:-1] + edges[1:]) / 2.0
+
+        vals = df_clustered[col].to_numpy(dtype=float)
+        vals = np.clip(vals, 0.0, 1.0)
+
+        idx = np.digitize(vals, edges, right=False) - 1
+        idx = np.clip(idx, 0, len(centers) - 1)
+        snapped = centers[idx]
+
+        if jitter and jitter > 0:
+            snapped = snapped + rng.uniform(-jitter, jitter, size=snapped.shape)
+            snapped = np.clip(snapped, 0.0, 1.0)
+
+        new_col = f"{col}__clustered_{b}bins"
+        df_clustered[new_col] = snapped
+        clustered_cols.append(new_col)
+
+    # -----------------------
+    # Plot curved coordinates
+    # -----------------------
+    data = df_clustered[clustered_cols].to_numpy(dtype=float)
+    x = np.arange(len(clustered_cols), dtype=float)
+
+    cmap = LinearSegmentedColormap.from_list("temp_scale", list(custom_colors))
+    norm = mcolors.Normalize(
+        vmin=float(df_clustered[color_by].min()),
+        vmax=float(df_clustered[color_by].max()),
+    )
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # vertical axes
+    for xi in x:
+        ax.vlines(xi, 0, 1, color="black", linewidth=0.8, alpha=0.35)
+
+    highlight_set = set(highlight_indices or [])
+
+    for row_i in range(len(df_clustered)):
+        y = data[row_i, :]
+
+        verts = [(x[0], y[0])]
+        codes = [mpath.Path.MOVETO]
+
+        for k in range(len(clustered_cols) - 1):
+            x0, y0 = x[k], y[k]
+            x1, y1 = x[k + 1], y[k + 1]
+            dx = x1 - x0
+
+            c1 = (x0 + curvature * dx, y0)
+            c2 = (x1 - curvature * dx, y1)
+
+            verts.extend([c1, c2, (x1, y1)])
+            codes.extend([mpath.Path.CURVE4, mpath.Path.CURVE4, mpath.Path.CURVE4])
+
+        path = mpath.Path(verts, codes)
+
+        base_color = cmap(norm(float(df_clustered.iloc[row_i][color_by])))
+
+        orig_idx = int(df_clustered.iloc[row_i]["_orig_index"])
+        is_hi = orig_idx in highlight_set
+
+        lw = linewidth * (highlight_factor if is_hi else 1.0)
+        a = highlight_alpha if is_hi else alpha
+
+        patch = PathPatch(
+            path,
+            facecolor="none",
+            edgecolor=base_color,
+            lw=lw,
+            alpha=a,
+            capstyle="round",
+            joinstyle="round",
+        )
+        ax.add_patch(patch)
+
+    ax.set_xlim(x[0] - 0.3, x[-1] + 0.3)
+    ax.set_ylim(0, 1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=x_rotation, ha="right")
+    ax.set_ylabel("Clustered (binned) value in [0,1]  (after inversion for 'min')")
+
+    if title:
+        ax.set_title(title)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    plt.show()
+
+    return df_scaled, df_clustered, fig, ax
+
+
+
+
+
+def plot_colorbar_standalone(
+    df: pd.DataFrame,
+    color_by: str,
+    custom_colors=("#d62728", "#ff7f0e", "#9ecae1", "#08519c"),
+    figsize=(1.5, 5),
+    label=None,
+    orientation="vertical",
+    title=None,
+):
+    """
+    Plots a standalone colorbar matching the one used in
+    curved_parallel_coordinates_clustered().
+
+    Parameters
+    ----------
+    df        : The SAME df you pass to curved_parallel_coordinates_clustered
+                (before any internal scaling — i.e. your original df).
+    color_by  : Same value as used in the main plot.
+    custom_colors : Same tuple as used in the main plot.
+    figsize   : Figure size for the colorbar figure.
+    label     : Colorbar label. Defaults to the column name.
+    orientation : "vertical" or "horizontal".
+    title     : Optional figure title.
+    """
+    # --- Replicate exactly what the main function does ---
+    series = pd.to_numeric(df[color_by], errors="coerce").dropna()
+
+    cmap = LinearSegmentedColormap.from_list("temp_scale", list(custom_colors))
+    norm = mcolors.Normalize(vmin=float(series.min()), vmax=float(series.max()))
+
+    # --- Standalone figure with a single colorbar ---
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_visible(False)                         # hide the axes entirely
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])                              # required by matplotlib
+
+    cbar = fig.colorbar(
+        sm,
+        ax=ax,
+        orientation=orientation,
+        fraction=1.0,           # fill the whole figure
+        pad=0.0,
+    )
+    cbar.set_label(label if label is not None else color_by, fontsize=12)
+
+    if title:
+        fig.suptitle(title, fontsize=13)
+
+    plt.tight_layout()
+    plt.show()
+
+    return fig, cbar

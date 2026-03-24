@@ -1,0 +1,28 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: JUSTICE Integrated Assessment Modelling Framework
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Palok
+    family-names: Biswas
+    email: p.biswas.nl@gmail.com
+    affiliation: Delft University of Technology
+    orcid: 'https://orcid.org/0000-0003-3830-7203'
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.15145121
+    description: Zenodo
+repository-code: 'https://github.com/pollockDeVis/JUSTICE'
+keywords:
+  - integrated assessment model
+  - climate-economy
+  - deep uncertainty
+  - normative uncertainty
+license: BSD-3-Clause
+version: 0.2.0
+date-released: '2025-06-23'
