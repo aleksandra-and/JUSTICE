@@ -2,7 +2,6 @@ main_args:
   # algorithm name
   algo: 'happo'
   env: 'harl_justice_momarl'
-  wandb_project: 'momarl_diff_obj'
 
 env_args:
   env_name: 'harl_justice_momarl'
@@ -41,7 +40,7 @@ algo_args:
     torch_threads: 4
   train:
     # number of parallel environments for training data collection
-    n_rollout_threads: 5
+    n_rollout_threads: 20
     # number of total training steps
     num_env_steps: 2508000
     # number of steps per environment per training data collection

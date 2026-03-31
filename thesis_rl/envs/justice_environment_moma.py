@@ -32,12 +32,12 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
 
     # Available objectives
     SUPPORTED_OBJECTIVES = [
-        "inverse_global_temperature",  # 1 / global_temperature (higher is better)
-        "global_economic_output",      # sum of net economic output (higher is better)
-        "consumption_per_capita",      # consumption / population (higher is better)
+        "inverse_global_temperature",  # 1 / global_temperature
+        "global_economic_output",      # sum of net economic output
+        "consumption_per_capita",      # consumption / population
         "gini_consumption",            # Gini coefficient of consumption (lower is better, we negate)
-        "avg_temperature_threshold",   # fraction of ensembles below 2C threshold
-        "welfare",                     # spatially aggregated welfare (higher is better)
+        "temperature_threshold",       # fraction of ensembles below 2C threshold
+        "welfare",                     # spatially aggregated welfare
     ]
 
     def __init__(self, args=None, render_mode=None):
@@ -174,7 +174,9 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         self.action_mask = {agent: self.get_avail_agent_actions(i) for i, agent in enumerate(self.agents)}
         infos = {
             a: {
-                'rewards': np.array(rewards[a]).copy(),  # Copy to avoid modification by wrappers
+                'rewards': np.array(rewards[a]).copy(),
+                'temperature': data['global_temperature'][self.timestep, :].mean(),
+                'economic_output': data['net_economic_output'][:, self.timestep, :].mean(axis=1).sum(),
                 'mitigated_emissions': self.agent_emissions_control_rate[i, self.timestep],
                 'savings_rate': self.agent_savings_rate[i, self.timestep],
                 'action_mask': self.action_mask[a],
@@ -272,7 +274,7 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                     agent_rewards.append(r)
                 
                 elif obj == 'welfare':
-                    r = data['stepwise_marl_reward'][:, self.timestep].sum()
+                    r = data["spatially_aggregated_welfare"][self.timestep]
                     agent_rewards.append(r)
                 elif obj == 'consumption_per_capita':
                     # Regional consumption per capita for this agent's cluster
@@ -289,7 +291,7 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                     r = -gini  # Negate so that lower inequality = higher reward
                     agent_rewards.append(r)
                     
-                elif obj == 'avg_temperature_threshold':
+                elif obj == 'temperature_threshold':
                     # Fraction of ensemble members below 2C threshold
                     below_threshold = np.where(data['global_temperature'][self.timestep, :] <= 2.0, 1.0, 0.0).sum()
                     r = below_threshold / len(self.ensables)

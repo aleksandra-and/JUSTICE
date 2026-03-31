@@ -170,7 +170,7 @@ def main():
     # Create experiment group name for wandb
     timestamp = int(time.time())
     datenow = time.strftime("%Y%m", time.localtime(timestamp))
-    exp_name = f"momarl_{args['algo']}_{momarl_args['weights_generation']}_{algo_args['train']['num_env_steps']}_{datenow}"
+    exp_name = f"momarl_{args['algo']}_{momarl_args['weights_generation']}_{datenow}"
     wandb_group = exp_name  # All runs in this experiment share this group
     args['exp_name'] = exp_name
     
@@ -221,7 +221,8 @@ def main():
         print(f"{'='*60}")
         
         # Update experiment name for this weight
-        weight_run_name = f"{exp_name}_w{momarl_args['start_uniform_weight'] + weight_idx}"
+        random_suffix = np.random.randint(1000, 9999)  # To ensure unique run names
+        weight_run_name = f"{exp_name}_w{momarl_args['start_uniform_weight'] + weight_idx}_{random_suffix}"
         args['exp_name'] = weight_run_name
         
         # Start a new wandb run for this weight (grouped with other weights)
@@ -234,6 +235,7 @@ def main():
                 "weight_idx": weight_idx,
                 "weights": weights.tolist(),
                 "weight_run_name": weight_run_name,
+                "algorithm": args["algo"],
                 **algo_args.get('algo', {}),
                 **env_args,
                 **momarl_args,

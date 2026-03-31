@@ -331,7 +331,12 @@ class SocialWelfareFunction:
         )
 
         # Check if inequality_aversion_transformed_utility is a 2D or a 3D array
-        if len(inequality_aversion_transformed_utility.shape) == 2:
+        if len(inequality_aversion_transformed_utility.shape) == 1:
+            # Stepwise: population_ratio is 1D (regions,)
+            population_weighted_utility = (
+                population_ratio * inequality_aversion_transformed_utility
+            )
+        elif len(inequality_aversion_transformed_utility.shape) == 2:
             population_weighted_utility = (
                 population_ratio * inequality_aversion_transformed_utility
             )
