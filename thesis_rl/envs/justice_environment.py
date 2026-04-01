@@ -51,12 +51,23 @@ class JusticeEnvironment(ParallelEnv):
         self.timestep = None
         self.ensables = args.ensables
         self.fixed_savings_rate = args.fixed_savings_rate
+        
+        social_welfare_function = WelfareFunction.UTILITARIAN
+        if args.welfare_type == 'utilitarian':
+            social_welfare_function = WelfareFunction.UTILITARIAN
+        elif args.welfare_type == 'prioritarian':
+            social_welfare_function = WelfareFunction.PRIORITARIAN
+        elif args.welfare_type == 'sufficientarian':
+            social_welfare_function = WelfareFunction.SUFFICIENTARIAN
+        elif args.welfare_type == 'egalitarian':
+            social_welfare_function = WelfareFunction.EGALITARIAN
+            
         self.model = JUSTICE(
             scenario=2, # SSP scenarios
             economy_type=Economy.NEOCLASSICAL,
             damage_function_type=DamageFunction.KALKUHL,
             abatement_type=Abatement.ENERDATA,
-            social_welfare_function=WelfareFunction.UTILITARIAN,  # WelfareFunction.UTILITARIAN,
+            social_welfare_function=social_welfare_function, 
             climate_ensembles=self.ensables, # climate uncertainty ensebles
             clustering=True,
             cluster_level=len(self.possible_agents),

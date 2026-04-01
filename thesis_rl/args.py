@@ -27,6 +27,7 @@ class EnvArgs:
     state_type: str = 'EP'  # 'Environment Provided' or 'Function Pruned'
     num_actions: int = 21 # Number of discrete actions (e.g. 0.0, 0.05, ..., 1.0 for emissions control rate)
     fixed_savings_rate: bool = False # Whether to fix savings rate or let agents control it
+    welfare_type: str = 'utilitarian' # Type of social welfare function: 'utilitarian', 'prioritarian', 'sufficientarian', 'egalitarian'
     
     # MOMARL-specific arguments
     rewards: list = field(default_factory=lambda: ['inverse_global_temperature', 'global_economic_output'])  # List of objectives for MOMARL

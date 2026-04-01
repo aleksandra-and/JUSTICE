@@ -14,6 +14,7 @@ env_args:
   state_type: 'EP'
   num_actions: 11
   fixed_savings_rate: False
+  welfare_type: 'utilitarian'
 
   # MOMARL-specific configuration
   rewards:
