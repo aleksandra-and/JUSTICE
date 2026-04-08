@@ -28,6 +28,10 @@ class EnvArgs:
     num_actions: int = 21 # Number of discrete actions (e.g. 0.0, 0.05, ..., 1.0 for emissions control rate)
     fixed_savings_rate: bool = False # Whether to fix savings rate or let agents control it
     welfare_type: str = 'utilitarian' # Type of social welfare function: 'utilitarian', 'prioritarian', 'sufficientarian', 'egalitarian'
+    evaluation_output_dir: str = "results/detailed_analysis/evaluation"  
+    evaluation_run_tag: str = "default"  # Tag to identify evaluation runs
+    start_year: int = 2015
+    end_year: int = 2300
     
     # MOMARL-specific arguments
     rewards: list = field(default_factory=lambda: ['inverse_global_temperature', 'global_economic_output'])  # List of objectives for MOMARL
@@ -97,6 +101,12 @@ def parse_args():
         type=str,
         default="harl_justice_momarl",
         help="Wandb project name."
+    )
+    parser.add_argument(
+        "--evaluation_output_dir",
+        type=str,
+        default="results/detailed_analysis/evaluation",
+        help="Directory to save evaluation results.",
     )
     parser.add_argument(
         "--load_config",

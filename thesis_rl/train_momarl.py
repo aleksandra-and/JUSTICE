@@ -221,7 +221,7 @@ def main():
         print(f"{'='*60}")
         
         # Update experiment name for this weight
-        random_suffix = np.random.randint(1000, 9999)  # To ensure unique run names
+        random_suffix = int(time.time() * 1000) % 10000
         weight_run_name = f"{exp_name}_w{momarl_args['start_uniform_weight'] + weight_idx}_{random_suffix}"
         args['exp_name'] = weight_run_name
         
@@ -247,7 +247,8 @@ def main():
         
         # Evaluate policy to get vector returns
         try:
-            vec_return = evaluate_policy_vector_rewards(runner, env_args, num_episodes=5)
+            num_eval_episodes = algo_args["eval"].get("eval_episodes", 10)
+            vec_return = evaluate_policy_vector_rewards(runner, env_args, num_episodes=num_eval_episodes)
             print(f"Vector return: {vec_return}")
         except Exception as e:
             print(f"Warning: Could not evaluate policy: {e}")

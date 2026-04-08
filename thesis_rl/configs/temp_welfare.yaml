@@ -15,7 +15,9 @@ env_args:
   num_actions: 11
   fixed_savings_rate: False
   welfare_type: 'utilitarian'
-
+  start_year: 2015
+  end_year: 2300
+  
   # MOMARL-specific configuration
   rewards:
     - 'temperature_threshold'

@@ -15,6 +15,9 @@ env_args:
   num_actions: 11
   fixed_savings_rate: False
   welfare_type: 'utilitarian'
+  evaluation_run_tag: 'mappo'
+  start_year: 2015
+  end_year: 2300
 
   # MOMARL-specific configuration
   rewards:
@@ -43,13 +46,13 @@ algo_args:
     # number of parallel environments for training data collection
     n_rollout_threads: 15
     # number of total training steps
-    num_env_steps: 2508000
+    num_env_steps: 1000000
     # number of steps per environment per training data collection
     episode_length: 285
     # logging interval
-    log_interval: 20
+    log_interval: 30
     # evaluation interval
-    eval_interval: 100
+    eval_interval: 15
     # whether to use ValueNorm
     use_valuenorm: True
     # whether to use linear learning rate decay
@@ -60,11 +63,11 @@ algo_args:
     model_dir: ~
   eval:
     # whether to use evaluation
-    use_eval: False
+    use_eval: True
     # number of parallel environments for evaluation
     n_eval_rollout_threads: 10
     # number of episodes per evaluation
-    eval_episodes: 285
+    eval_episodes: 10
   render:
     # whether to use render
     use_render: False
