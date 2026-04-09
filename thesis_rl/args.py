@@ -24,6 +24,7 @@ class EnvArgs:
     ensables: list
     env_name: str
     action_change: int = 1 # How much agent action can change per step
+    discrete_actions: bool = True # Whether to use discrete actions (emission control rates) or continuous actions
     state_type: str = 'EP'  # 'Environment Provided' or 'Function Pruned'
     num_actions: int = 21 # Number of discrete actions (e.g. 0.0, 0.05, ..., 1.0 for emissions control rate)
     fixed_savings_rate: bool = False # Whether to fix savings rate or let agents control it

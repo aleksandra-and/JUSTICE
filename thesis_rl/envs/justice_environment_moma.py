@@ -5,7 +5,6 @@ Extends MOParallelEnv from MOMAland to provide vector rewards for multi-objectiv
 optimization. Compatible with MOMAland wrappers (LinearizeReward, NormalizeReward).
 """
 
-import matplotlib.pyplot as plt
 import numpy as np
 from copy import copy
 import functools
@@ -17,7 +16,6 @@ import h5py
 
 from gymnasium.spaces import Discrete, Box, MultiDiscrete
 from momaland.utils.env import MOParallelEnv
-from wandb import agent
 
 from justice.model import JUSTICE
 from justice.util.enumerations import *
@@ -57,6 +55,9 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                 'action_change': 3,
                 'fixed_savings_rate': True,
                 'welfare_type': 'utilitarian',
+                'start_year': 2025,
+                'end_year': 2150,
+                'discrete_actions': True,
             })()
         
         self.LOCAL_OBSERVATIONS = [
@@ -74,9 +75,10 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         self.agents = None
         self.timestep = None
         self.ensables = args.ensables
+        self.discrete_actions = args.discrete_actions
         
+        # Welfare function configuration
         self.welfare_type = getattr(args, 'welfare_type', 'utilitarian')
-
         social_welfare_function = WelfareFunction.UTILITARIAN
         if self.welfare_type == 'utilitarian':
             social_welfare_function = WelfareFunction.UTILITARIAN
@@ -133,9 +135,12 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                 'global_temperature',
                 'emissions',
                 'constrained_emission_control_rate',
+                'constrained_savings_rate',
                 'net_economic_output',
                 'consumption_per_capita',
                 'regional_temperature',
+                'spatially_aggregated_welfare',
+                'welfare',
             ]
         self._episode_counter = -1
         self._episode_saved = False
@@ -149,7 +154,6 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         self._episode_saved = False
         
         self.timestep = 0
-        self.action_change = 3
         self.agent_emissions_control_rate = np.zeros((len(self.possible_agents), self.num_years+1))
         self.agent_savings_rate = np.zeros((len(self.possible_agents), self.num_years+1))
         
@@ -247,6 +251,10 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
             mask[start:end] = 1.0
             return mask
         
+        # No action mask for continuous actions
+        if not self.discrete_actions:
+            return None 
+        
         # Agent can choose any action in the first step
         if self.timestep == 0:
             if self.fixed_savings_rate:
@@ -320,6 +328,8 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                     agent_rewards.append(r)
                 
                 elif obj == 'welfare':
+                    # Per-step reward uses spatially_aggregated_welfare (spatial agg. at this timestep).
+                    # The full temporally-discounted scalar 'welfare' is only available after evaluate().
                     r = data["spatially_aggregated_welfare"][self.timestep]
                     agent_rewards.append(r)
                 elif obj == 'consumption_per_capita':
@@ -339,8 +349,9 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                     
                 elif obj == 'temperature_threshold':
                     # Fraction of ensemble members below 2C threshold
-                    below_threshold = np.where(data['global_temperature'][self.timestep, :] <= 2.0, 1.0, 0.0).sum()
-                    r = below_threshold / len(self.ensables)
+                    temp_ensemble = data['global_temperature'][self.timestep, :]
+                    below_threshold = np.where(temp_ensemble <= 2.0, 1.0, 0.0).sum()
+                    r = below_threshold / len(temp_ensemble)
                     agent_rewards.append(r)
             
             rewards[agent] = np.array(agent_rewards, dtype=np.float32)
@@ -426,12 +437,18 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
     
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        if self.fixed_savings_rate:
-            # Single action: emission control only
-            return Discrete(self.num_actions)
+        if self.discrete_actions:
+            if self.fixed_savings_rate:
+                # Single action: emission control only
+                return Discrete(self.num_actions)
+            else:
+                # Two actions: emission control and savings rate
+                return MultiDiscrete([self.num_actions, self.num_actions])
         else:
-            # Two actions: emission control and savings rate
-            return MultiDiscrete([self.num_actions, self.num_actions])
+            if self.fixed_savings_rate:
+                return Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
+            else:
+                return Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32)
     
     @functools.lru_cache(maxsize=None)
     def reward_space(self, agent):
@@ -473,67 +490,75 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                 dtype=np.float32,
             )
 
-    def _build_constrained_emission_control_rate(self):
-        """Expand cluster-level agent actions to full regional tensor for plotting/export."""
-        emissions_reference = self.model.data['emissions']
-        n_regions, n_timesteps, n_ensembles = emissions_reference.shape
-
-        constrained_emission_control_rate = np.zeros(
-            (n_regions, n_timesteps, n_ensembles),
-            dtype=np.float32,
-        )
-        available_timesteps = min(n_timesteps, self.agent_emissions_control_rate.shape[1])
-
+    def _expand_cluster_to_regions(self, cluster_array: np.ndarray) -> np.ndarray:
+        """Expand a (n_agents, n_timesteps) agent array to (n_regions, n_timesteps, n_ensembles)."""
+        n_regions, n_timesteps, n_ensembles = self.model.data['emissions'].shape
+        available_t = min(n_timesteps, cluster_array.shape[1])
+        regional = np.zeros((n_regions, n_timesteps, n_ensembles), dtype=np.float32)
         cluster_mapping = self.model.cluster_to_country
-        if isinstance(cluster_mapping, dict):
-            cluster_items = sorted(cluster_mapping.items(), key=lambda x: int(x[0]))
-        else:
-            cluster_items = list(enumerate(cluster_mapping))
-
-        for agent_idx, region_indices in cluster_items:
-            if agent_idx >= self.agent_emissions_control_rate.shape[0]:
-                continue
-
-            agent_policy = self.agent_emissions_control_rate[agent_idx, :available_timesteps].astype(np.float32)
+        items = (
+            sorted(cluster_mapping.items(), key=lambda x: int(x[0]))
+            if isinstance(cluster_mapping, dict)
+            else enumerate(cluster_mapping)
+        )
+        for agent_idx, region_indices in items:
             region_indices = np.atleast_1d(np.array(region_indices, dtype=np.int64))
-            constrained_emission_control_rate[region_indices, :available_timesteps, :] = agent_policy[None, :, None]
+            regional[region_indices, :available_t, :] = (
+                cluster_array[agent_idx, :available_t].astype(np.float32)[None, :, None]
+            )
+        return regional
 
-        return constrained_emission_control_rate
+    def _build_constrained_emission_control_rate(self) -> np.ndarray:
+        return self._expand_cluster_to_regions(self.agent_emissions_control_rate)
+
+    def _build_constrained_savings_rate(self) -> np.ndarray:
+        return self._expand_cluster_to_regions(self.agent_savings_rate)
 
     def _append_objective_summary(self, datasets, constrained_emission_control_rate):
         """Append episode-level summary metrics for quick model selection."""
         summary_path = self.evaluation_output_dir / 'objective_summary.csv'
         file_exists = summary_path.exists()
 
-        global_temperature = datasets.get('global_temperature')
+        global_temperature = datasets.get('global_temperature')  # (timesteps, ensembles)
         years_above_threshold = np.nan
         final_global_temperature = np.nan
         if isinstance(global_temperature, np.ndarray) and global_temperature.ndim == 2:
-            mean_global_temperature = np.mean(global_temperature, axis=1)
-            years_above_threshold = int(np.sum(mean_global_temperature > 2.0))
-            final_timestep = min(self.timestep, global_temperature.shape[0] - 1)
-            final_global_temperature = float(np.mean(global_temperature[final_timestep, :]))
+            mean_temp = global_temperature.mean(axis=1)  # (timesteps,)
+            years_above_threshold = int((mean_temp > 2.0).sum())
+            final_global_temperature = float(global_temperature[min(self.timestep, len(mean_temp) - 1)].mean())
 
-        emissions_value = datasets.get('emissions')
+        emissions_value = datasets.get('emissions')  # (regions, timesteps, ensembles)
         peak_global_emissions = np.nan
         final_global_emissions = np.nan
-        if isinstance(emissions_value, np.ndarray) and emissions_value.ndim >= 2:
-            mean_global_emissions = np.mean(emissions_value, axis=tuple(range(1, emissions_value.ndim)))
-            peak_global_emissions = float(np.max(mean_global_emissions))
-            final_timestep = min(self.timestep, emissions_value.shape[1] - 1)
-            final_global_emissions = float(np.mean(emissions_value[:, final_timestep, ...]))
+        if isinstance(emissions_value, np.ndarray) and emissions_value.ndim == 3:
+            # sum regions → mean ensembles → (timesteps,)
+            global_per_timestep = emissions_value.sum(axis=0).mean(axis=1)
+            peak_global_emissions = float(global_per_timestep.max())
+            final_global_emissions = float(global_per_timestep[min(self.timestep, len(global_per_timestep) - 1)])
 
-        net_economic_output = datasets.get('net_economic_output')
+        net_economic_output = datasets.get('net_economic_output')  # (regions, timesteps, ensembles)
         final_global_net_output = np.nan
         if isinstance(net_economic_output, np.ndarray) and net_economic_output.ndim == 3:
-            final_timestep = min(self.timestep, net_economic_output.shape[1] - 1)
-            final_global_net_output = float(np.sum(np.mean(net_economic_output[:, final_timestep, :], axis=1)))
+            t = min(self.timestep, net_economic_output.shape[1] - 1)
+            final_global_net_output = float(net_economic_output[:, t, :].mean(axis=1).sum())
 
-        welfare_value = datasets.get('welfare')
-        if isinstance(welfare_value, np.ndarray):
-            welfare_value = float(np.squeeze(welfare_value))
-        elif welfare_value is not None:
-            welfare_value = float(welfare_value)
+        # welfare = scalar (temporally + spatially aggregated)
+        raw_welfare = datasets.get('welfare')
+        if raw_welfare is not None:
+            arr = np.asarray(raw_welfare)
+            welfare_value = float(arr.item()) if arr.ndim == 0 or arr.size == 1 else float(arr.mean())
+        else:
+            welfare_value = np.nan
+
+        # spatially_aggregated_welfare = time series (spatially aggregated only)
+        raw_saw = datasets.get('spatially_aggregated_welfare')
+        if raw_saw is not None:
+            arr_saw = np.asarray(raw_saw)
+            saw_final = float(arr_saw[min(self.timestep, len(arr_saw) - 1)])
+            saw_mean = float(arr_saw[:min(self.timestep + 1, len(arr_saw))].mean())
+        else:
+            saw_final = np.nan
+            saw_mean = np.nan
 
         n_regions = int(constrained_emission_control_rate.shape[0])
 
@@ -547,6 +572,8 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
             'num_objectives': self.num_objectives,
             'objectives': '|'.join(self.rewards_list),
             'welfare': welfare_value,
+            'spatially_aggregated_welfare_final': saw_final,
+            'spatially_aggregated_welfare_mean': saw_mean,
             'years_above_temperature_threshold': years_above_threshold,
             'final_global_temperature': final_global_temperature,
             'peak_global_emissions': peak_global_emissions,
@@ -571,7 +598,9 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
 
         datasets = dict(self.model.evaluate())
         constrained_emission_control_rate = self._build_constrained_emission_control_rate()
+        constrained_savings_rate = self._build_constrained_savings_rate()
         datasets['constrained_emission_control_rate'] = constrained_emission_control_rate
+        datasets['constrained_savings_rate'] = constrained_savings_rate
 
         episode_prefix = f"{self.evaluation_run_tag}_idx{self._episode_counter}"
 
@@ -595,18 +624,11 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         if self.save_summary_csv:
             self._append_objective_summary(datasets, constrained_emission_control_rate)
 
+
         return datasets
     
     def render(self):
-        if self.timestep == self.num_years - 1:
-            data = self.model.stepwise_evaluate(timestep=self.timestep)
-            # for i, agent in enumerate(self.possible_agents):
-            #     print(
-            #         f"  Regional Temperature: {data['regional_temperature'][self.model.cluster_to_country[i], self.timestep, :].mean(axis=1).mean():.2f}, "
-            #         f"  Net Economic Output: {data['net_economic_output'][self.model.cluster_to_country[i], self.timestep, :].mean(axis=1).mean():.2f}"
-            #     )
-
-            if self.save_evaluation_data and not self._episode_saved:
-                print(f"Saving evaluation outputs in file {self.evaluation_output_dir} with tag {self.evaluation_run_tag}...")
-                self._save_evaluation_outputs()
-                self._episode_saved = True
+        if self.timestep == self.num_years - 1 and self.save_evaluation_data and not self._episode_saved:
+            print(f"Saving evaluation outputs to {self.evaluation_output_dir} (tag: {self.evaluation_run_tag})...")
+            self._save_evaluation_outputs()
+            self._episode_saved = True

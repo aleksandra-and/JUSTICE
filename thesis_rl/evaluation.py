@@ -10,6 +10,8 @@ def main():
     algo_args["render"]["use_render"] = True
     algo_args["train"]["model_dir"] = args["model_dir"]
     
+    env_args["evaluation_output_dir"] = args["evaluation_output_dir"]
+    
     runner = RUNNER_REGISTRY[args["algo"]](args, algo_args, env_args)
     runner.run()
     runner.close()

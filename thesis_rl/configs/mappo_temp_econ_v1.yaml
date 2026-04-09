@@ -12,12 +12,12 @@ env_args:
             ]
   action_change: 1
   state_type: 'EP'
-  num_actions: 21
+  num_actions: 11
   fixed_savings_rate: False
   welfare_type: 'utilitarian'
   evaluation_run_tag: 'mappo'
-  start_year: 2025
-  end_year: 2150
+  start_year: 2015
+  end_year: 2300
 
   # MOMARL-specific configuration
   rewards:
@@ -48,10 +48,10 @@ algo_args:
     # number of total training steps
     num_env_steps: 1000000
     # number of steps per environment per training data collection
-    episode_length: 126
+    episode_length: 275
     # logging interval
     log_interval: 30
-    # evaluation interval
+    # evaluation interval 
     eval_interval: 15
     # whether to use ValueNorm
     use_valuenorm: True
@@ -72,7 +72,7 @@ algo_args:
     # whether to use render
     use_render: False
     # number of episodes to render
-    render_episodes: 10
+    render_episodes: 1
   model:
     # network parameters
     # hidden sizes for mlp module in the network

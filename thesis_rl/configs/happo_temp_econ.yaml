@@ -12,12 +12,12 @@ env_args:
             ]
   action_change: 1
   state_type: 'EP'
-  num_actions: 11
+  num_actions: 21
   fixed_savings_rate: False
   welfare_type: 'utilitarian'
   evaluation_run_tag: 'happo'
-  start_year: 2015
-  end_year: 2300
+  start_year: 2025
+  end_year: 2150
 
   # MOMARL-specific configuration
   rewards:
@@ -48,7 +48,7 @@ algo_args:
     # number of total training steps
     num_env_steps: 1000000
     # number of steps per environment per training data collection
-    episode_length: 285
+    episode_length: 126
     # logging interval
     log_interval: 30
     # evaluation interval 
