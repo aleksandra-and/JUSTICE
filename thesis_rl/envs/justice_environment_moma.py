@@ -111,7 +111,8 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         self.end_year = args.end_year
         self.agent_emissions_control_rate = None
         self.agent_savings_rate = None
-        self.num_years = self.end_year - self.start_year
+        # Precompute number of years for episode length and array sizing
+        self.num_years = self.end_year - self.model.time_horizon.start_year
         self.action_change = args.action_change
         
         # Multi-objective configuration
@@ -153,9 +154,24 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         self._episode_counter += 1
         self._episode_saved = False
         
-        self.timestep = 0
+        self.timestep = self.start_year - self.model.time_horizon.start_year
         self.agent_emissions_control_rate = np.zeros((len(self.possible_agents), self.num_years+1))
         self.agent_savings_rate = np.zeros((len(self.possible_agents), self.num_years+1))
+        
+        # Run the model up to the initial timestep to populate initial observations and state
+        for i in range(self.timestep):
+            self.model.stepwise_run(
+                emission_control_rate=self.agent_emissions_control_rate[:, i], 
+                endogenous_savings_rate=True, 
+                timestep=i)
+            self.model.stepwise_evaluate(timestep=i)
+            
+            # Save the model's fixed savings rate for observations (clustered average)
+            for agent_idx in range(len(self.possible_agents)):
+                self.agent_savings_rate[agent_idx, i] = \
+                    self.model.savings_rate[
+                        self.model.cluster_to_country[agent_idx], i
+                    ].mean()
         
         observations = self.get_observations(self.model.stepwise_evaluate(timestep=self.timestep), None)
         self.action_mask = {agent: self.get_avail_agent_actions(i) for i, agent in enumerate(self.agents)}
@@ -170,13 +186,21 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         return observations, infos
 
     def step(self, actions):
+        agent_actions_np = np.array([actions[agent] for agent in self.agents])
         # Get corresponding actions for all agents
         if self.fixed_savings_rate:
             # Single action: [emission control]
-            self.agent_emissions_control_rate[:, self.timestep] = [
+            if self.discrete_actions:
+                self.agent_emissions_control_rate[:, self.timestep] = [
                     actions[agent][0] / (self.num_actions - 1)
-                for agent in self.agents
-            ]
+                    for agent in self.agents
+                ]
+            else:
+                self.agent_emissions_control_rate[:, self.timestep] = np.clip(
+                        self.agent_emissions_control_rate[:, max(self.timestep-1, 0)] + 
+                        agent_actions_np[:, 0], 0, 1
+                    )
+                
             # Use endogenous savings rate from model
             self.model.stepwise_run(
                 emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
@@ -190,20 +214,36 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                 ].mean()
         else:
             # Two actions: [emission_control_action, savings_rate_action]
-            self.agent_emissions_control_rate[:, self.timestep] = [
-                actions[agent][0] / (self.num_actions - 1)
-                for agent in self.agents
-            ]
-            self.agent_savings_rate[:, self.timestep] = [
-                actions[agent][1] / (self.num_actions - 1)
-                for agent in self.agents
-            ]
-            self.model.stepwise_run(
-                emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
-                timestep=self.timestep,
-                savings_rate=self.agent_savings_rate[:, self.timestep],
-                endogenous_savings_rate=False
-            )
+            if self.discrete_actions:
+                self.agent_emissions_control_rate[:, self.timestep] = [
+                    actions[agent][0] / (self.num_actions - 1)
+                    for agent in self.agents
+                ]
+                self.agent_savings_rate[:, self.timestep] = [
+                    actions[agent][1] / (self.num_actions - 1)
+                    for agent in self.agents
+                ]
+            else:
+                self.agent_emissions_control_rate[:, self.timestep] = np.clip(
+                    self.agent_emissions_control_rate[:, max(self.timestep-1, 0)] + 
+                        agent_actions_np[:, 0],
+                    0, 1
+                )
+                self.agent_savings_rate[:, self.timestep] = np.clip(
+                    self.agent_savings_rate[:, max(self.timestep-1, 0)] + 
+                        agent_actions_np[:, 1], 
+                    0, 1
+                )
+        if self.timestep < 50:
+            print(f"Action change limit:", self.action_change)
+            print(f"Timestep {self.timestep}: Emission control rates: {self.agent_emissions_control_rate[:, self.timestep]}, Savings rates: {self.agent_savings_rate[:, self.timestep]}")
+            print(f"Actions received: {agent_actions_np}")
+        self.model.stepwise_run(
+            emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
+            timestep=self.timestep,
+            savings_rate=self.agent_savings_rate[:, self.timestep],
+            endogenous_savings_rate=False
+        )
         
         data = self.model.stepwise_evaluate(timestep=self.timestep)
         
@@ -446,9 +486,9 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                 return MultiDiscrete([self.num_actions, self.num_actions])
         else:
             if self.fixed_savings_rate:
-                return Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
+                return Box(low=-self.action_change, high=self.action_change, shape=(1,), dtype=np.float32)
             else:
-                return Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32)
+                return Box(low=-self.action_change, high=self.action_change, shape=(2,), dtype=np.float32)
     
     @functools.lru_cache(maxsize=None)
     def reward_space(self, agent):
@@ -534,12 +574,15 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
             # sum regions → mean ensembles → (timesteps,)
             global_per_timestep = emissions_value.sum(axis=0).mean(axis=1)
             peak_global_emissions = float(global_per_timestep.max())
-            final_global_emissions = float(global_per_timestep[min(self.timestep, len(global_per_timestep) - 1)])
+            # Economy/emissions are not computed at the boundary timestep; use t-1
+            t_em = min(self.timestep - 1, len(global_per_timestep) - 1)
+            final_global_emissions = float(global_per_timestep[t_em])
 
         net_economic_output = datasets.get('net_economic_output')  # (regions, timesteps, ensembles)
         final_global_net_output = np.nan
         if isinstance(net_economic_output, np.ndarray) and net_economic_output.ndim == 3:
-            t = min(self.timestep, net_economic_output.shape[1] - 1)
+            # Economy is not computed at the boundary timestep; use t-1
+            t = min(self.timestep - 1, net_economic_output.shape[1] - 1)
             final_global_net_output = float(net_economic_output[:, t, :].mean(axis=1).sum())
 
         # welfare = scalar (temporally + spatially aggregated)

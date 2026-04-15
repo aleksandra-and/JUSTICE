@@ -401,3 +401,5 @@ exp_results/*
 results/*
 wandb/*
 momarl_results/*
+thesis_rl/evaluation/detailed_analysis/*
+thesis_rl/evaluation/figures/*

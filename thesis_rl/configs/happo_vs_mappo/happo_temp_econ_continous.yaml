@@ -10,7 +10,8 @@ env_args:
   ensables: [
               319, 672, 67, 591, 652, 700, 628, 233, 290, 239, 847, 919, 278, 609, 126
             ]
-  action_change: 1
+  action_change: 0.05
+  discrete_actions: False
   state_type: 'EP'
   num_actions: 21
   fixed_savings_rate: False
@@ -48,11 +49,11 @@ algo_args:
     # number of total training steps
     num_env_steps: 1000000
     # number of steps per environment per training data collection
-    episode_length: 126
+    episode_length: 125
     # logging interval
-    log_interval: 30
+    log_interval: 10
     # evaluation interval 
-    eval_interval: 15
+    eval_interval: 10
     # whether to use ValueNorm
     use_valuenorm: True
     # whether to use linear learning rate decay
@@ -65,9 +66,9 @@ algo_args:
     # whether to use evaluation
     use_eval: True
     # number of parallel environments for evaluation
-    n_eval_rollout_threads: 10
+    n_eval_rollout_threads: 5
     # number of episodes per evaluation
-    eval_episodes: 10
+    eval_episodes: 5
   render:
     # whether to use render
     use_render: False

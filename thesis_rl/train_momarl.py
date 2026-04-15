@@ -76,8 +76,8 @@ def evaluate_policy_vector_rewards(runner, env_args, num_episodes=5):
     num_objectives = eval_env.num_objectives
     vec_returns = []
     
-    # Get device from runner
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rnn_hidden_size = runner.rnn_hidden_size
+    recurrent_n = runner.recurrent_n
     
     for episode in range(num_episodes):
         obs, infos = eval_env.reset(seed=episode)
@@ -87,8 +87,7 @@ def evaluate_policy_vector_rewards(runner, env_args, num_episodes=5):
         # Initialize RNN states for all agents
         rnn_states = {}
         for i, agent in enumerate(eval_env.agents):
-            # Create dummy RNN states (shape: 1, recurrent_N, hidden_size)
-            rnn_states[agent] = np.zeros((1, 1, 64), dtype=np.float32)
+            rnn_states[agent] = np.zeros((1, recurrent_n, rnn_hidden_size), dtype=np.float32)
         
         while not done:
             # Get actions from trained policy
@@ -99,11 +98,12 @@ def evaluate_policy_vector_rewards(runner, env_args, num_episodes=5):
                 avail_actions = np.array([infos[agent].get('action_mask', None)])
                 
                 with torch.no_grad():
-                    action, _, rnn_state = runner.actor[i].get_actions(
+                    action, rnn_state = runner.actor[i].act(
                         obs_array,
                         rnn_states[agent],
                         masks,
                         avail_actions if avail_actions[0] is not None else None,
+                        deterministic=True,
                     )
                 
                 rnn_states[agent] = rnn_state.cpu().numpy() if hasattr(rnn_state, 'cpu') else rnn_state
@@ -299,39 +299,6 @@ def main():
     print(f"Trained {weight_idx} policies")
     print(f"Results saved to: {results_path}")
     print(f"{'='*60}")
-    
-    # Log final Pareto front approximation
-    if len(eval_results["vector_returns"]) > 0:
-        vec_returns = np.array(eval_results["vector_returns"])
-        print(f"\nPareto front approximation:")
-        for i, (w, vr) in enumerate(zip(eval_results["weights"], eval_results["vector_returns"])):
-            print(f"  Policy {i}: weights={w}, return={vr}")
-        
-        # Create a summary wandb run for the Pareto front
-        wandb.init(
-            entity="olaandrasz-tu-delft",
-            project="harl_justice_momarl",
-            group=wandb_group,
-            name=f"summary_pareto_front",
-            job_type="summary",
-            config={
-                "num_policies": len(eval_results["weights"]),
-                "objectives": eval_results["objectives"],
-                **momarl_args,
-            },
-        )
-        
-        # Create a table for the Pareto front
-        objectives = eval_results.get("objectives", ["obj_0", "obj_1"])
-        columns = ["policy_idx", "weight_0", "weight_1"] + [f"return_{obj}" for obj in objectives]
-        pareto_table = wandb.Table(columns=columns)
-        
-        for i, (w, vr) in enumerate(zip(eval_results["weights"], eval_results["vector_returns"])):
-            row = [i, w[0], w[1]] + vr
-            pareto_table.add_data(*row)
-        
-        wandb.log({"pareto_front": pareto_table})
-        wandb.finish()
     
     # Save final results
     with open(results_path / "final_results.json", "w") as f:
