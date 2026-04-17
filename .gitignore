@@ -400,6 +400,6 @@ cython_debug/
 exp_results/*
 results/*
 wandb/*
-momarl_results/*
+momarl_wandb_logs/*
 thesis_rl/evaluation/detailed_analysis/*
 thesis_rl/evaluation/figures/*

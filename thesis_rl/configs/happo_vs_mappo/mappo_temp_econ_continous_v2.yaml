@@ -51,9 +51,9 @@ algo_args:
     # number of steps per environment per training data collection
     episode_length: 275
     # logging interval
-    log_interval: 10
+    log_interval: 20
     # evaluation interval 
-    eval_interval: 10
+    eval_interval: 20
     # whether to use ValueNorm
     use_valuenorm: True
     # whether to use linear learning rate decay
@@ -150,4 +150,4 @@ algo_args:
     fixed_order: False
   logger:
     # logging directory
-    log_dir: "./results/mappo_continous_2"
+    log_dir: "./results/continous_3_fixed"

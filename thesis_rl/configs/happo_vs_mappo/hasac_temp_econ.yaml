@@ -57,7 +57,7 @@ algo_args:
     # logging interval (currently unused)
     log_interval: ~
     # evaluation interval
-    eval_interval: 2750
+    eval_interval: 5500
     # whether to use ValueNorm
     use_valuenorm: True
     # whether to use linear learning rate decay
@@ -77,7 +77,7 @@ algo_args:
     # whether to use render
     use_render: False
     # number of episodes to render
-    render_episodes: 10
+    render_episodes: 1
   model:
     # network parameters
     # hidden sizes for mlp module in the network
@@ -126,4 +126,4 @@ algo_args:
     fixed_order: False
   logger:
     # logging directory
-    log_dir: "./results/hasac_temp_econ"
+    log_dir: "./results/continous_3_fixed"

@@ -187,7 +187,6 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
 
     def step(self, actions):
         agent_actions_np = np.array([actions[agent] for agent in self.agents])
-        # Get corresponding actions for all agents
         if self.fixed_savings_rate:
             # Single action: [emission control]
             if self.discrete_actions:
@@ -234,10 +233,10 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
                         agent_actions_np[:, 1], 
                     0, 1
                 )
-        if self.timestep < 50:
-            print(f"Action change limit:", self.action_change)
-            print(f"Timestep {self.timestep}: Emission control rates: {self.agent_emissions_control_rate[:, self.timestep]}, Savings rates: {self.agent_savings_rate[:, self.timestep]}")
-            print(f"Actions received: {agent_actions_np}")
+        # if self.timestep < 50:
+        #     print(f"Action change limit:", self.action_change)
+        #     print(f"Timestep {self.timestep}: Emission control rates: {self.agent_emissions_control_rate[:, self.timestep]}, Savings rates: {self.agent_savings_rate[:, self.timestep]}")
+        #     print(f"Actions received: {agent_actions_np}")
         self.model.stepwise_run(
             emission_control_rate=self.agent_emissions_control_rate[:, self.timestep],
             timestep=self.timestep,
