@@ -94,6 +94,8 @@ def parse_args():
         ],
         help="Environment name. Choose from: smac, mamujoco, pettingzoo_mpe, gym, football, dexhands, smacv2, lag, harl_justice, harl_justice_momarl.",
     )
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
     parser.add_argument(
         "--exp_name", type=str, default="installtest", help="Experiment name."
     )
@@ -152,5 +154,7 @@ def parse_args():
     if args["env"] == "dexhands":
         algo_args["eval"]["use_eval"] = False
         algo_args["train"]["episode_length"] = env_args["hands_episode_length"]
-        
+    
+    algo_args['seed']['seed'] = args['seed']  # Ensure seed is set in algo_args for reproducibility
+    
     return args, algo_args, env_args

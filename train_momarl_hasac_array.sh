@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-#SBATCH --job-name="momarl-mappo"
+#SBATCH --job-name="momarl-hasac"
 #SBATCH --partition=compute
 #SBATCH --time=13:00:00
 #SBATCH --ntasks=1
@@ -33,7 +33,7 @@ fi
 
 echo "Array task $SLURM_ARRAY_TASK_ID: training weights $START_WEIGHT to $((END_WEIGHT - 1))"
 
-srun python thesis_rl/train_momarl.py --load_config 'thesis_rl/configs/hasac_temp_econ.yaml' \
+srun python -u thesis_rl/train_momarl.py --load_config 'thesis_rl/configs/happo_vs_mappo/hasac_temp_econ.yaml' \
     --wandb_project momarl_algo_comparison \
     --weights_generation uniform \
     --num_weights $TOTAL_WEIGHTS \

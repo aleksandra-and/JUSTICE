@@ -1,6 +1,6 @@
 main_args:
   # algorithm name
-  algo: 'hasac'
+  algo: 'hatd3'
   env: 'harl_justice_momarl'
 
 env_args:
@@ -16,7 +16,7 @@ env_args:
   num_actions: 21
   fixed_savings_rate: False
   welfare_type: 'utilitarian'
-  evaluation_run_tag: 'hasac'
+  evaluation_run_tag: 'hatd3'
   start_year: 2025
   end_year: 2300
 
@@ -30,7 +30,7 @@ env_args:
   normalize_rewards: True
 
 algo_args:
-  # This is the configuration file for the HASAC algorithm.
+  # This is the configuration file for the HATD3 algorithm.
   seed:
     # whether to use the specified seed
     seed_specify: True
@@ -38,14 +38,14 @@ algo_args:
     seed: 1
   device:
     # whether to use CUDA
-    cuda: False
+    cuda: True
     # whether to set CUDA deterministic
     cuda_deterministic: True
     # arg to torch.set_num_threads
     torch_threads: 4
   train:
     # number of parallel environments for training data collection
-    n_rollout_threads: 15
+    n_rollout_threads: 10
     # number of total steps
     num_env_steps: 1000000
     # number of warmup steps
@@ -58,8 +58,6 @@ algo_args:
     log_interval: ~
     # evaluation interval
     eval_interval: 2750
-    # whether to use ValueNorm
-    use_valuenorm: True
     # whether to use linear learning rate decay
     use_linear_lr_decay: False
     # whether to consider the case of truncation when an episode is done
@@ -70,40 +68,28 @@ algo_args:
     # whether to use evaluation
     use_eval: True
     # number of parallel environments for evaluation
-    n_eval_rollout_threads: 5
+    n_eval_rollout_threads: 20
     # number of episodes per evaluation
-    eval_episodes: 5
+    eval_episodes: 40
   render:
     # whether to use render
     use_render: False
     # number of episodes to render
-    render_episodes: 1
+    render_episodes: 10
   model:
     # network parameters
     # hidden sizes for mlp module in the network
     hidden_sizes: [64, 64]
     # activation function, choose from sigmoid, tanh, relu, leaky_relu, selu
     activation_func: relu
-    # whether to use feature normalization
-    use_feature_normalization: True
     # final activation function, choose from sigmoid, tanh, relu, leaky_relu, selu
     final_activation_func: tanh
-    # initialization method for network parameters, choose from xavier_uniform_, orthogonal_, ...
-    initialization_method: orthogonal_
-    # gain of the output layer of the network.
-    gain: 0.01
     # optimizer parameters
     # actor learning rate
     lr: 0.0005
     # critic learning rate
-    critic_lr: 0.0005
+    critic_lr: 0.001
   algo:
-    # whether to auto-tune temperature
-    auto_alpha: False
-    # temperature parameter
-    alpha: 0.001
-    # alpha learning rate
-    alpha_lr: 0.0003
     # discount factor
     gamma: 0.99
     # off-policy buffer size
@@ -112,14 +98,16 @@ algo_args:
     batch_size: 1000
     # coefficient for target model soft update
     polyak: 0.005
+    # exploration noise
+    expl_noise: 0.1
+    # smoothing noise added to target policy
+    policy_noise: 0.2
+    # Limit for target policy smoothing noise
+    noise_clip: 0.5
+    # policy update frequency
+    policy_freq: 2
     # the number of steps to look ahead
-    n_step: 20
-    # whether to use huber loss
-    use_huber_loss: True
-    # whether to use policy active masks
-    use_policy_active_masks: True
-    # huber delta
-    huber_delta: 10.0
+    n_step: 1
     # whether to share parameter among actors
     share_param: False
     # whether to use a fixed optimisation order

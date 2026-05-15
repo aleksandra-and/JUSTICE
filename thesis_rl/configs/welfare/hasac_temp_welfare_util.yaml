@@ -22,8 +22,8 @@ env_args:
 
   # MOMARL-specific configuration
   rewards:
-    - 'inverse_global_temperature'
-    - 'global_economic_output'
+    - 'temperature_threshold'
+    - 'welfare'
   weights:
     - 0.5
     - 0.5
