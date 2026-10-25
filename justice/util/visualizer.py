@@ -1200,7 +1200,7 @@ def plot_median_emission_comparison_with_baseline(
     fig = go.Figure()
     # Enumerate through the data_frames and plot the line plots in the same figure
     for idx, median in enumerate(data_frames):
-        line_dash = "dash" if idx == 0 else "solid"
+        line_dash = "dash" if idx != 0 else "solid"
         fig.add_trace(
             go.Scatter(
                 x=median.index,

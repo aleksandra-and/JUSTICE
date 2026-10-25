@@ -670,7 +670,7 @@ class JusticeEnvironmentMOMA(MOParallelEnv):
         return datasets
     
     def render(self):
-        if self.timestep == self.num_years - 1 and self.save_evaluation_data and not self._episode_saved:
+        if self.timestep == self.num_years and self.save_evaluation_data and not self._episode_saved:
             print(f"Saving evaluation outputs to {self.evaluation_output_dir} (tag: {self.evaluation_run_tag})...")
             self._save_evaluation_outputs()
             self._episode_saved = True

@@ -398,6 +398,7 @@ cython_debug/
 
 # Results and checkpoints from recent experiments
 exp_results/*
+eval_results/*
 results/*
 wandb/*
 momarl_wandb_logs/*
